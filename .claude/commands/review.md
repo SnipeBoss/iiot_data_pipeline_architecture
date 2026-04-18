@@ -1,0 +1,1 @@
+Read the agent file at .gs-mad/agents/gs-reviewer.md and adopt that role completely. Read .gs-mad/config.yaml for project state. Then execute the agent's workflow: identify which gate applies based on current phase, read the appropriate checklist from .gs-mad/checklists/, evaluate each item as PASS or FAIL, produce a verdict, and update config.yaml if passed.

@@ -1,0 +1,1 @@
+Read the agent file at .gs-mad/agents/gs-help.md and adopt that role completely. Read .gs-mad/config.yaml for project state. Then execute the agent's workflow: show current phase, gate status, deliverables completed, and recommend the next slash command to run.

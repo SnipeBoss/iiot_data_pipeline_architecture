@@ -1,20 +1,7 @@
-"""Extract from Supabase OLTP (cloud Postgres) into Oracle AI03 staging.
-
-Architecture (see claude_track/PLAN.md Phase 5):
-  Supabase ──psycopg2─▶  [this DAG]  ──HTTP bulk-insert─▶  Oracle API  ─JDBC─▶ Oracle AI03
-
-Each task is `TRUNCATE + INSERT` on its STG table (idempotent). Task scope is
-a single calendar day (`{{ ds }}`) so a rerun for the same execution date
-overwrites cleanly.
-
-Schedule: every 8h at 06:00 / 14:00 / 22:00 (CLAUDE.md §6).
-"""
-
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Callable
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -22,12 +9,24 @@ from airflow.operators.python import PythonOperator
 from _oracle_api import bulk_insert, health
 from _supabase import supabase_cursor
 
+
+"""Extract Supabase OLTP → Oracle STG ตาม schema ใหม่ (NEW_ARCHITECTURE)
+
+Architecture:
+  Supabase ──psycopg2──▶ [DAG] ──HTTP bulk-insert──▶ Oracle API ──JDBC──▶ AI03 STG
+
+Tasks:
+  - extract_production_batch — ดึง batch ที่เสร็จ (end_time IS NOT NULL) ใน 15-min window
+  - extract_qc_record       — ดึง qc_record ที่ inspected ใน window
+
+แต่ละ task เป็น TRUNCATE + INSERT (idempotent) แต่ truncate แค่ rows ของ
+pipeline_run_id เดิม? → ไม่ใช่ truncate ทั้งตาราง แค่ delete ตาม window
+
+Schedule: ทุก 15 นาที (*/15 * * * *) ตาม NEW_ARCHITECTURE RQ
+"""
+
+
 log = logging.getLogger(__name__)
-
-
-# -----------------------------------------------------------------------------
-# Extract/load helpers. Each returns rows for the given `ds` date.
-# -----------------------------------------------------------------------------
 
 
 def _extract(sql: str, params: tuple) -> list[list]:
@@ -36,167 +35,82 @@ def _extract(sql: str, params: tuple) -> list[list]:
         return [list(row) for row in cur.fetchall()]
 
 
+def check_oracle_api(**_) -> None:
+    """Short-circuit DAG ถ้า Oracle API ไม่ตอบ"""
+    info = health()
+    log.info("oracle-api up: user=%s sysdate=%s",
+             info.get("oracle_user"), info.get("oracle_sysdate"))
+
+
 def load_production_batch(**ctx) -> None:
-    ds = ctx["ds"]
+    """ดึง batch ที่ end_time อยู่ใน 15-min window ของ execution interval"""
     run_id = ctx["run_id"]
+    start = ctx["data_interval_start"]
+    end   = ctx["data_interval_end"]
+
     rows = _extract(
         """
-        SELECT batch_id, order_id, line_id, stage_id,
-               started_at, completed_at, qty_produced
-        FROM production_batch
-        WHERE DATE(completed_at) = %s
+        SELECT batch_id, order_id,
+               (SELECT product_id FROM production_order po WHERE po.order_id = pb.order_id) AS product_id,
+               qty_planned, qty_out, start_time, end_time
+        FROM production_batch pb
+        WHERE end_time IS NOT NULL
+          AND end_time >= %s
+          AND end_time <  %s
         """,
-        (ds,),
+        (start, end),
     )
-    # Append src_system + pipeline_run_id to match STG schema
     payload = [r + ["SUPABASE", run_id] for r in rows]
+    log.info("extracted %d production_batch rows for %s → %s", len(rows), start, end)
     bulk_insert(
         "STG_PRODUCTION_BATCH",
-        columns=[
-            "batch_id", "order_id", "line_id", "stage_id",
-            "started_at", "completed_at", "qty_produced",
-            "src_system", "pipeline_run_id",
-        ],
-        rows=payload,
-        truncate=True,
-    )
-
-
-def load_qc_inspection(**ctx) -> None:
-    ds = ctx["ds"]
-    run_id = ctx["run_id"]
-    rows = _extract(
-        """
-        SELECT qc_id, batch_id, stage_id, sample_qty, inspected_at
-        FROM qc_inspection
-        WHERE DATE(inspected_at) = %s
-        """,
-        (ds,),
-    )
-    payload = [r + ["SUPABASE", run_id] for r in rows]
-    bulk_insert(
-        "STG_QC_INSPECTION",
-        columns=["qc_id", "batch_id", "stage_id", "sample_qty", "inspected_at",
+        columns=["batch_id", "order_id", "product_id",
+                 "qty_planned", "qty_out", "start_time", "end_time",
                  "src_system", "pipeline_run_id"],
         rows=payload,
         truncate=True,
     )
 
 
-def load_qc_result(**ctx) -> None:
-    ds = ctx["ds"]
+def load_qc_record(**ctx) -> None:
+    """ดึง qc_record ที่ inspected_at อยู่ใน window"""
     run_id = ctx["run_id"]
-    # Filter by inspected_at of the parent inspection so the grain matches the
-    # production day.
+    start = ctx["data_interval_start"]
+    end   = ctx["data_interval_end"]
+
     rows = _extract(
         """
-        SELECT qr.result_id, qr.qc_id, qr.parameter,
-               qr.measured_value, qr.spec_min, qr.spec_max, qr.pass_fail
-        FROM qc_result qr
-        JOIN qc_inspection qi ON qr.qc_id = qi.qc_id
-        WHERE DATE(qi.inspected_at) = %s
+        SELECT qc_id, batch_id, qty_sampled, qty_passed, qty_failed, inspected_at
+        FROM qc_record
+        WHERE inspected_at >= %s
+          AND inspected_at <  %s
         """,
-        (ds,),
+        (start, end),
     )
     payload = [r + ["SUPABASE", run_id] for r in rows]
+    log.info("extracted %d qc_record rows for %s → %s", len(rows), start, end)
     bulk_insert(
-        "STG_QC_RESULT",
-        columns=["result_id", "qc_id", "parameter", "measured_value",
-                 "spec_min", "spec_max", "pass_fail",
-                 "src_system", "pipeline_run_id"],
+        "STG_QC_RECORD",
+        columns=["qc_id", "batch_id", "qty_sampled", "qty_passed", "qty_failed",
+                 "inspected_at", "src_system", "pipeline_run_id"],
         rows=payload,
         truncate=True,
     )
 
-
-def load_maintenance_log(**ctx) -> None:
-    ds = ctx["ds"]
-    run_id = ctx["run_id"]
-    rows = _extract(
-        """
-        SELECT log_id, machine_id, type, started_at, ended_at,
-               downtime_min, issue_code
-        FROM maintenance_log
-        WHERE DATE(started_at) = %s
-        """,
-        (ds,),
-    )
-    payload = [r + ["SUPABASE", run_id] for r in rows]
-    bulk_insert(
-        "STG_MAINTENANCE_LOG",
-        columns=["log_id", "machine_id", "type", "started_at", "ended_at",
-                 "downtime_min", "issue_code",
-                 "src_system", "pipeline_run_id"],
-        rows=payload,
-        truncate=True,
-    )
-
-
-def load_inventory(**ctx) -> None:
-    """Full current-snapshot reload — inventory is not time-partitioned."""
-    run_id = ctx["run_id"]
-    rows = _extract(
-        """
-        SELECT material_id, qty_on_hand, qty_reserved, reorder_level,
-               warehouse_loc, updated_at
-        FROM inventory
-        """,
-        (),
-    )
-    payload = [r + ["SUPABASE", run_id] for r in rows]
-    bulk_insert(
-        "STG_INVENTORY",
-        columns=["material_id", "qty_on_hand", "qty_reserved", "reorder_level",
-                 "warehouse_loc", "updated_at", "src_system", "pipeline_run_id"],
-        rows=payload,
-        truncate=True,
-    )
-
-
-def load_material_consumption(**ctx) -> None:
-    ds = ctx["ds"]
-    run_id = ctx["run_id"]
-    rows = _extract(
-        """
-        SELECT consumption_id, batch_id, material_id, qty_used, consumed_at
-        FROM material_consumption
-        WHERE DATE(consumed_at) = %s
-        """,
-        (ds,),
-    )
-    payload = [r + ["SUPABASE", run_id] for r in rows]
-    bulk_insert(
-        "STG_MATERIAL_CONSUMPTION",
-        columns=["consumption_id", "batch_id", "material_id", "qty_used",
-                 "consumed_at", "src_system", "pipeline_run_id"],
-        rows=payload,
-        truncate=True,
-    )
-
-
-def check_oracle_api(**_) -> None:
-    """Short-circuit the DAG if the Oracle API isn't reachable."""
-    info = health()
-    log.info("oracle-api up: user=%s sysdate=%s", info.get("oracle_user"), info.get("oracle_sysdate"))
-
-
-# -----------------------------------------------------------------------------
-# DAG definition
-# -----------------------------------------------------------------------------
 
 default_args = {
     "owner": "data_engineer",
     "depends_on_past": False,
     "retries": 2,
-    "retry_delay": timedelta(minutes=5),
+    "retry_delay": timedelta(minutes=2),
 }
 
 with DAG(
     dag_id="etl_supabase_to_oracle",
-    description="Supabase OLTP -> Oracle AI03 STG, every 8h, one day per run.",
+    description="Supabase OLTP -> Oracle AI03 STG, every 15 min.",
     default_args=default_args,
-    schedule="0 6,14,22 * * *",
-    start_date=datetime(2026, 3, 19),
+    schedule="*/15 * * * *",
+    start_date=datetime(2026, 4, 18),
     catchup=False,
     max_active_runs=1,
     tags=["etl", "supabase", "oracle"],
@@ -207,15 +121,14 @@ with DAG(
         python_callable=check_oracle_api,
     )
 
-    tasks: list[tuple[str, Callable]] = [
-        ("extract_production_batch",     load_production_batch),
-        ("extract_qc_inspection",        load_qc_inspection),
-        ("extract_qc_result",            load_qc_result),
-        ("extract_maintenance_log",      load_maintenance_log),
-        ("extract_inventory",            load_inventory),
-        ("extract_material_consumption", load_material_consumption),
-    ]
+    extract_batch = PythonOperator(
+        task_id="extract_production_batch",
+        python_callable=load_production_batch,
+    )
 
-    for task_id, fn in tasks:
-        t = PythonOperator(task_id=task_id, python_callable=fn)
-        healthcheck >> t
+    extract_qc = PythonOperator(
+        task_id="extract_qc_record",
+        python_callable=load_qc_record,
+    )
+
+    healthcheck >> [extract_batch, extract_qc]

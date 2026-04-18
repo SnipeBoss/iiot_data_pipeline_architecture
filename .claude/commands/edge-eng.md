@@ -1,0 +1,1 @@
+Read the agent file at .gs-mad/agents/gs-edge-engineer.md and adopt that role completely. Read .gs-mad/config.yaml for project state. Then execute the agent's workflow based on current phase: P4 (ONNX export + TensorRT + benchmark), P5 (hardware setup + integration), P6 (UAT support), or P7 (production deploy with Docker). IoT track only.

@@ -1,12 +1,3 @@
-"""Chain the FACT-loader stored procedures after extract DAGs complete.
-
-Each task calls one SP via the Oracle API's `/sp/call` endpoint. The SPs
-themselves do the heavy lifting (DELETE-by-date + INSERT-from-STG) — this
-DAG just schedules + orders them.
-
-Scheduled 30 minutes after the extract DAGs so STG is guaranteed fresh.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -16,6 +7,19 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 
 from _oracle_api import call_sp, health
+
+
+"""Chain FACT-loader SPs หลังจาก STG populate เสร็จ
+
+Tasks (parallel):
+  - sp_load_fact_production  — FACT_PRODUCTION จาก STG_PRODUCTION_BATCH
+  - sp_load_fact_quality     — FACT_QUALITY จาก STG_QC_RECORD
+  - sp_load_fact_sensor      — FACT_SENSOR จาก STG_SENSOR_AGG
+
+SP เองทำ DELETE-by-date + INSERT-from-STG (idempotent) — DAG แค่ schedule + call
+Schedule: 5 นาทีหลัง extract DAG (ให้ STG พร้อมก่อน)
+"""
+
 
 log = logging.getLogger(__name__)
 
@@ -38,15 +42,15 @@ default_args = {
     "owner": "data_engineer",
     "depends_on_past": False,
     "retries": 2,
-    "retry_delay": timedelta(minutes=5),
+    "retry_delay": timedelta(minutes=2),
 }
 
 with DAG(
     dag_id="sp_load_dw",
-    description="Chain FACT-loader SPs after STG is populated.",
+    description="Chain FACT-loader SPs (15-min offset from extract DAGs).",
     default_args=default_args,
-    schedule="30 6,14,22 * * *",
-    start_date=datetime(2026, 3, 19),
+    schedule="5,20,35,50 * * * *",   # 5 นาทีหลังทุก */15
+    start_date=datetime(2026, 4, 18),
     catchup=False,
     max_active_runs=1,
     tags=["oracle", "dw", "facts"],
@@ -57,26 +61,17 @@ with DAG(
         python_callable=check_oracle_api,
     )
 
-    # SP_LOAD_FACT_OEE is the primary deliverable; others in parallel after.
-    load_oee = PythonOperator(
-        task_id="sp_load_fact_oee",
-        python_callable=_make_sp_task("SP_LOAD_FACT_OEE"),
+    load_production = PythonOperator(
+        task_id="sp_load_fact_production",
+        python_callable=_make_sp_task("SP_LOAD_FACT_PRODUCTION"),
     )
     load_quality = PythonOperator(
         task_id="sp_load_fact_quality",
         python_callable=_make_sp_task("SP_LOAD_FACT_QUALITY"),
     )
-    load_maintenance = PythonOperator(
-        task_id="sp_load_fact_maintenance",
-        python_callable=_make_sp_task("SP_LOAD_FACT_MAINTENANCE"),
-    )
-    load_production = PythonOperator(
-        task_id="sp_load_fact_production",
-        python_callable=_make_sp_task("SP_LOAD_FACT_PRODUCTION"),
-    )
-    load_inventory = PythonOperator(
-        task_id="sp_load_fact_inventory",
-        python_callable=_make_sp_task("SP_LOAD_FACT_INVENTORY"),
+    load_sensor = PythonOperator(
+        task_id="sp_load_fact_sensor",
+        python_callable=_make_sp_task("SP_LOAD_FACT_SENSOR"),
     )
 
-    healthcheck >> [load_oee, load_quality, load_maintenance, load_production, load_inventory]
+    healthcheck >> [load_production, load_quality, load_sensor]

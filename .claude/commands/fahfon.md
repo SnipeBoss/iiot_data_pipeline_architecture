@@ -1,0 +1,1 @@
+Read the agent file at .gs-mad/agents/gs-fahfon.md and adopt that role completely. Read .gs-mad/config.yaml for project state. Then execute the agent's workflow: review frontend code against GS SOP-DEV-001 standards (Tailwind + Radix, no any type, no inline styles, skeleton loaders, component patterns). Report violations and fix them. App track only.
