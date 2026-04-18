@@ -1,0 +1,120 @@
+# Local Airflow stack. Runs against:
+#   - host-side Oracle API at http://host.docker.internal:8000  (you must start uvicorn first)
+#   - cloud Supabase                                             (public internet)
+#   - AWS InfluxDB                                               (public internet, if creds set)
+# Credentials are read from the repo-root .env via env_file.
+#
+# Bring up:
+#   docker compose -f db_module/pipeline/docker-compose.yml up -d --build
+# Tear down (keep metadata volume):
+#   docker compose -f db_module/pipeline/docker-compose.yml down
+# Full reset (drops metadata DB):
+#   docker compose -f db_module/pipeline/docker-compose.yml down -v
+
+x-airflow-common: &airflow-common
+  build: .
+  env_file:
+    - ../../.env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-af/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW_UID: "50000"
+    # Override the `ORACLE_API_URL=http://localhost:8000` from repo .env —
+    # inside Airflow containers `localhost` is the container itself, not the
+    # host where uvicorn listens. Use Docker's host-gateway alias instead.
+    ORACLE_API_URL: "http://host.docker.internal:8000"
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    postgres-af:
+      condition: service_healthy
+
+services:
+  postgres-af:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euxo pipefail
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Data \
+          --lastname Engineer \
+          --role Admin \
+          --email admin@example.com || true
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      # Host 8080 (label-studio) and 8081 (mongo-express) are both busy —
+      # use 8088 for this project.
+      - "8088:8080"
+    depends_on:
+      postgres-af:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      postgres-af:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}" || exit 1']
+      interval: 30s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+networks:
+  default:
+    # Supabase's direct-connection host (`db.<ref>.supabase.co`) resolves to
+    # IPv6 only. Docker Desktop's default bridge is IPv4-only, so containers
+    # can't reach it. Enabling IPv6 on the compose network + NAT6 lets us
+    # talk to IPv6 destinations through the host.
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: "192.168.7.0/24"
+        - subnet: "fd00:7::/64"
+
+volumes:
+  airflow-pgdata:
+  airflow-logs:

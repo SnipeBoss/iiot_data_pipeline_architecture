@@ -1,0 +1,24 @@
+# --- Oracle (JDBC via JayDeBeApi — python-oracledb cannot reach 10g) ---
+JayDeBeApi>=1.2.3
+JPype1>=1.5.0
+
+# --- Supabase / Postgres ---
+psycopg2-binary>=2.9.9
+
+# --- InfluxDB 2.x ---
+influxdb-client>=1.40.0
+
+# --- ETL + transforms ---
+pandas>=2.2.0
+
+# --- Serving layer ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+streamlit>=1.33.0
+requests>=2.31.0
+
+# --- Utilities ---
+python-dotenv>=1.0.0
+
+# --- Tests ---
+pytest>=8.0.0
