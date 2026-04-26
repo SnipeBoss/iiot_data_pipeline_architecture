@@ -7,7 +7,7 @@ End-to-end data pipeline สำหรับ Battery Assembly Line COS (1 line, 3
 ```
 [Supabase OLTP]   [InfluxDB sensor]
        |                |
-       +---> Airflow ETL (every 15 min) --->
+       +---> Airflow ETL (every 15 min) 
                         |
                         v
               Oracle 10g DW (AI03)
