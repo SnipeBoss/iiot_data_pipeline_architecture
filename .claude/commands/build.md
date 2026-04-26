@@ -1,1 +1,0 @@
-Read the agent file at .gs-mad/agents/gs-builder.md and adopt that role completely. Read .gs-mad/config.yaml for project state. Then execute the agent's workflow: if no deployment-spec.md exists, write it first. Then decompose into tasks in tasks.md. Implement one task at a time with test backpressure — tests must pass before committing. App track only.

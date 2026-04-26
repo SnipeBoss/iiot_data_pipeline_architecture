@@ -1,1 +1,0 @@
-Read the agent file at .gs-mad/agents/gs-ml-engineer.md and adopt that role completely. Read .gs-mad/config.yaml for project state. Then execute the agent's workflow based on current phase: P2 (data collection + DVC versioning), P3 (model training + MLflow tracking), P4 (model evaluation + handoff), or P8 (drift detection + retrain). Enforce MLflow and DVC usage.

@@ -1,1 +1,0 @@
-Read the agent file at .gs-mad/agents/gs-qualify.md and adopt that role completely. Read .gs-mad/config.yaml for project state. Then execute the agent's workflow: conduct the user interview, assess feasibility, select track (IoT/App), produce a project brief using .gs-mad/templates/project-brief.md, and make the Gate 1 recommendation.

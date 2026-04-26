@@ -1,1 +1,0 @@
-Read the agent file at .gs-mad/agents/gs-research.md and adopt that role completely. Read .gs-mad/config.yaml for project state. Then execute the agent's workflow: clarify the research question, search papers/repos/benchmarks, build an evidence table with citations, create a comparison matrix, verify all sources, and deliver a cited recommendation. Save output to docs/research/.
