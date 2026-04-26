@@ -8,6 +8,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 
 from _oracle_api import bulk_insert, health
+from influxdb_client import InfluxDBClient
 
 
 """Aggregate InfluxDB sensor data → Oracle STG_SENSOR_AGG ทุก 15 นาที
@@ -17,7 +18,7 @@ from _oracle_api import bulk_insert, health
 - Aggregation = mean/min/max + count ต่อ (machine_id × field)
 - Output: 1 row ต่อ (machine × metric × window)
   * 3 machines × 6 metrics = สูงสุด 18 row ต่อรอบ
-  * filter ตาม DIM_METRIC.machine_name ฝั่ง SP_LOAD_FACT_SENSOR
+  * filter ตาม DIM_METRIC.machine_code ฝั่ง SP_LOAD_FACT_SENSOR
   * ตรงนี้ extract ทุก metric ทุกเครื่องที่มีข้อมูล (transform ตอน load fact)
 
 Flux schema:
@@ -33,19 +34,28 @@ INFLUX_RANGE_START env override = สำหรับ ad-hoc test (เช่น "
 log = logging.getLogger(__name__)
 
 
+# 2026-04-26: ต้อง match กับ DIM_METRIC.metric_name + DIM_MACHINE.machine_code เป๊ะๆ
+# ถ้า Influx schema drift (เช่น เพิ่ม metric ใหม่) → DAG fail loud แทน silent miss
+EXPECTED_METRICS = {
+    "temperature_c", "machine_state_num", "cycle_count",
+    "vibration_g", "current_a", "voltage_v",
+}
+EXPECTED_MACHINES = {"M01", "M02", "M03"}
+
+
 def check_oracle_api(**_) -> None:
     info = health()
     log.info("oracle-api up: user=%s", info.get("oracle_user"))
 
 
 def extract_sensor_agg(**ctx) -> None:
+
     url = os.environ.get("INFLUX_URL")
     token = os.environ.get("INFLUX_TOKEN")
     if not url or not token:
         log.warning("INFLUX_URL / INFLUX_TOKEN unset — skipping")
         return
 
-    from influxdb_client import InfluxDBClient
 
     org = os.environ.get("INFLUX_ORG", "factory")
     bucket = os.environ.get("INFLUX_BUCKET", "iiot_data_raw")
@@ -107,14 +117,18 @@ def extract_sensor_agg(**ctx) -> None:
         # window_start = win_end - 15 นาที (aggregateWindow ใส่ timestamp ที่ end)
         window_start = (win_end - timedelta(minutes=15)).replace(tzinfo=None)
         window_end_naive = win_end.replace(tzinfo=None)
+        # 2026-04-19 fix: ถ้า min/max key ไม่ match mean → ใช้ None ไม่ fallback avg
+        # (ก่อนนี้ fallback avg ทำให้ min/max column misleading โดย silent)
+        min_raw = mins.get((machine, field, win_end))
+        max_raw = maxs.get((machine, field, win_end))
         rows.append([
             str(machine),
             str(field),
             window_start,
             window_end_naive,
             float(avg_val) if avg_val is not None else None,
-            float(mins.get((machine, field, win_end), avg_val) or avg_val),
-            float(maxs.get((machine, field, win_end), avg_val) or avg_val),
+            float(min_raw) if min_raw is not None else None,
+            float(max_raw) if max_raw is not None else None,
             int(counts.get((machine, field, win_end), 0) or 0),
             "INFLUXDB",
             run_id,
@@ -124,10 +138,25 @@ def extract_sensor_agg(**ctx) -> None:
         log.warning("Flux returned 0 rows for %s → %s", start, end)
         return
 
+    # Validate ก่อน bulk_insert — ถ้า InfluxDB schema drift จะ fail loud
+    # (ไม่ silent FACT_SENSOR empty เพราะ JOIN ไม่เจอ)
+    unknown_metrics = {row[1] for row in rows if row[1] not in EXPECTED_METRICS}
+    unknown_machines = {row[0] for row in rows if row[0] not in EXPECTED_MACHINES}
+    if unknown_metrics:
+        raise ValueError(
+            f"unknown metric_name(s) ใน Influx ไม่ตรง DIM_METRIC: {sorted(unknown_metrics)}"
+        )
+    if unknown_machines:
+        raise ValueError(
+            f"unknown machine_code(s) ใน Influx ไม่ตรง DIM_MACHINE: {sorted(unknown_machines)}"
+        )
+
     log.info("writing %d sensor aggregate rows", len(rows))
     bulk_insert(
         "STG_SENSOR_AGG",
-        columns=["machine_name", "metric_name", "window_start", "window_end",
+        # 2026-04-26: column ใน STG_SENSOR_AGG เปลี่ยนจาก machine_name → machine_code
+        # match กับ DIM_MACHINE.machine_code (M01/M02/M03)
+        columns=["machine_code", "metric_name", "window_start", "window_end",
                  "avg_value", "min_value", "max_value", "sample_count",
                  "src_system", "pipeline_run_id"],
         rows=rows,
@@ -141,7 +170,13 @@ default_args = {
     "retry_delay": timedelta(minutes=2),
 }
 
+
+
+
+
 with DAG(
+
+    # Defined ID Name
     dag_id="etl_influxdb_to_oracle",
     description="InfluxDB (AWS) -> Oracle STG_SENSOR_AGG, every 15 min.",
     default_args=default_args,
@@ -150,7 +185,20 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     tags=["etl", "influx", "oracle"],
+
 ) as dag:
-    hc = PythonOperator(task_id="check_oracle_api", python_callable=check_oracle_api)
-    extract = PythonOperator(task_id="aggregate_sensor", python_callable=extract_sensor_agg)
+    
+    # Checking Oracle API 
+    hc = PythonOperator(
+        task_id="check_oracle_api", 
+        python_callable=check_oracle_api
+    )
+
+    # Set InfluxDB Aggregate Sensor
+    extract = PythonOperator(
+        task_id="aggregate_sensor", 
+        python_callable=extract_sensor_agg
+    )
+
+    # Send to extract task
     hc >> extract

@@ -2,15 +2,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# เพิ่ม repo root เข้า sys.path เพื่อ import db_module ได้
-# path ใหม่: db_module/db_sources/oracle_sql_query/run_sql_file.py → parents[3] = repo root
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from db_module.db_conn import OracleConnector  
 
 
 
-"""รัน DDL script ของ Oracle ต่อ schema AI03 ผ่าน OracleConnector
+"""
+รัน DDL script ของ Oracle ต่อ schema AI03 ผ่าน OracleConnector
 
 หลักการแยกคำสั่ง:
 - คำสั่ง SQL ปกติแยกด้วย `;` ที่ท้ายบรรทัด
@@ -29,14 +28,20 @@ from db_module.db_conn import OracleConnector
 
 
 # Keywords ที่ใช้ตรวจจับการเริ่มต้น PL/SQL block
-# รวม CREATE OR REPLACE สำหรับ PROCEDURE/FUNCTION/TRIGGER/PACKAGE
+# ต้องระบุ object type ให้ชัด (PROCEDURE/FUNCTION/TRIGGER/PACKAGE) — ห้ามใช้
+# `CREATE OR REPLACE ` แบบหลวม ๆ เพราะจะ match `CREATE OR REPLACE VIEW` ด้วย
+# (view ไม่ใช่ PL/SQL block; จบด้วย `;` ปกติ ไม่ต้อง `/`)
 _PLSQL_BLOCK_STARTS = (
     "BEGIN",
     "DECLARE",
-    "CREATE OR REPLACE ",
+    "CREATE OR REPLACE PROCEDURE",
+    "CREATE OR REPLACE FUNCTION",
+    "CREATE OR REPLACE TRIGGER",
+    "CREATE OR REPLACE PACKAGE",
     "CREATE PROCEDURE",
     "CREATE FUNCTION",
     "CREATE TRIGGER",
+    "CREATE PACKAGE",
 )
 
 
@@ -112,11 +117,14 @@ def apply(sql_path: Path) -> int:
     cur = conn.cursor()
     try:
         for i, stmt in enumerate(statements, start=1):
+            
             # แสดง 80 ตัวแรกของบรรทัดแรกเพื่อให้ progress อ่านง่าย
             first_line = stmt.splitlines()[0][:80]
             print(f"  [{i:>3}/{len(statements)}] {first_line}")
+
             try:
                 cur.execute(stmt)
+
             except Exception as exc:
                 # Fail-fast: พบ error → rollback ทุกอย่างที่ทำไว้แล้ว exit
                 print(f"\nFAIL on statement {i}:\n{stmt}\n---\n{exc}")
@@ -125,6 +133,7 @@ def apply(sql_path: Path) -> int:
         conn.commit()
         print("\nOK — all statements applied and committed.")
         return 0
+    
     finally:
         cur.close()
         conn.close()

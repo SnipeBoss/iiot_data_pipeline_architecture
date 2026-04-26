@@ -1,808 +1,795 @@
-# Battery Process Performance Dashboard
+# Unified IIoT Data Architecture
 
-End-to-end data pipeline สำหรับวัด process performance ของสายประกอบ battery
-(1 line, 3 เครื่อง — M01/M02/M03). Ingest ข้อมูลจาก OLTP (Supabase) และ
-IIoT sensor (AWS InfluxDB) → Oracle Data Warehouse → Streamlit dashboard
-รีเฟรชทุก 15 นาที
+End-to-end data pipeline สำหรับ Battery Assembly Line COS (1 line, 3 machines: M01/M02/M03)
+ที่ ingest ข้อมูลจาก 2 sources (Supabase OLTP + InfluxDB sensor) → Oracle 10g Data Warehouse
+(Kimball star schema) → FastAPI HTTP layer → Streamlit dashboard 3 pages
 
-> Architecture ปัจจุบันตาม [`NEW_ARCHITECTURE.md`](NEW_ARCHITECTURE.md) — ลดรูป
-> จาก OEE-focused design เดิมให้เหมาะกับ POC ที่มี scope สั้น
+```
+[Supabase OLTP]   [InfluxDB sensor]
+       |                |
+       +---> Airflow ETL (every 15 min) --->
+                        |
+                        v
+              Oracle 10g DW (AI03)
+              7 DIM + 5 FACT + 8 STG
+                        |
+                        v
+                FastAPI (port 8000)
+                10 endpoints
+                        |
+                        v
+              Streamlit (port 8501)
+              3 pages + Prophet forecast
+```
+
+> **Last updated:** 2026-04-26 (post-cleanup, dead code removed)
+> **Production data:** 373 batches, 6152 sensor windows over 8 days
 
 ---
 
 ## Table of Contents
 
-- [Stack](#stack)
-- [Directory Layout](#directory-layout)
-- [Data Flow](#data-flow)
-- [Prerequisites](#prerequisites)
-- [First-Time Setup (Step-by-Step)](#first-time-setup-step-by-step)
-  - [1. Python environment](#1-python-environment)
-  - [2. Oracle JDBC driver](#2-oracle-jdbc-driver)
-  - [3. `.env` file](#3-env-file)
-  - [4. Smoke-test connectors](#4-smoke-test-connectors)
-  - [5. สร้าง Supabase schema + mock data](#5-สร้าง-supabase-schema--mock-data)
-  - [6. สร้าง Oracle DW schema](#6-สร้าง-oracle-dw-schema)
-  - [7. Seed DIM tables](#7-seed-dim-tables)
-  - [8. Start services](#8-start-services)
-  - [9. Trigger first ETL run](#9-trigger-first-etl-run)
-  - [10. เปิด dashboard](#10-เปิด-dashboard)
-- [Daily Operations](#daily-operations)
-- [Service Management](#service-management)
-- [Troubleshooting](#troubleshooting)
-- [Scripts Reference](#scripts-reference)
-- [Key Design Notes](#key-design-notes)
-- [Testing](#testing)
-- [Progress & Planning](#progress--planning)
+1. [Stack Overview](#1-stack-overview)
+2. [Repository Layout](#2-repository-layout)
+3. [Data Flow](#3-data-flow)
+4. [Database Layer (`db_module/`)](#4-database-layer-db_module)
+5. [Application Layer (`app/`)](#5-application-layer-app)
+6. [Pipeline Layer (Airflow)](#6-pipeline-layer-airflow)
+7. [Oracle DW Schema](#7-oracle-dw-schema)
+8. [Setup from Scratch](#8-setup-from-scratch)
+9. [Daily Operations](#9-daily-operations)
+10. [Smoke Tests](#10-smoke-tests)
+11. [Troubleshooting](#11-troubleshooting)
+12. [Constraints & Design Decisions](#12-constraints--design-decisions)
 
 ---
 
-## Stack
+## 1. Stack Overview
 
-| Layer | Tech | Role |
-|---|---|---|
-| OLTP | Supabase (PostgreSQL) | Production orders, batches, QC records (6 ตาราง) |
-| IIoT | NodeRED → InfluxDB 2.0 (AWS) | sensor 1 Hz, 6 fields × 3 machines |
-| Orchestration | Apache Airflow 2.8 (Docker) | 3 DAGs รันทุก 15 นาที |
-| Serving | FastAPI (uvicorn) | HTTP wrapper รอบ Oracle JDBC |
-| Data Warehouse | Oracle 10.2.0.3 @ KMITL (`AI03`) | 3 STG + 4 DIM + 3 FACT |
-| Dashboard | Streamlit | Production / Quality / Sensor / Machine Status |
+| Layer | Tech | Role | Hosted |
+|---|---|---|---|
+| **OLTP source** | PostgreSQL via Supabase | 12-table MES (orders, batches, QC, downtime) | Cloud |
+| **IIoT source** | InfluxDB 2.x + Telegraf + Node-RED + Mosquitto | 1 Hz sensor (6 fields × 3 machines) | AWS EC2 |
+| **DW** | Oracle 10.2.0.3 (`AI03`) | Kimball star schema, 20 tables | KMITL `161.246.35.92:1521/orcl` |
+| **HTTP layer** | FastAPI + uvicorn | JDBC wrapper + analytics endpoints | host (port 8000) |
+| **Dashboard** | Streamlit + Plotly + Prophet | 3 pages (OEE / Forecast / Schedule) | host (port 8501) |
+| **Pipeline** | Apache Airflow 2.8 | 4 DAGs (3 ETL @15min + 1 DIM sync nightly) | Docker compose (port 8088) |
+| **Driver** | JDBC thin (`ojdbc8.jar`) via `jaydebeapi` + `jpype` | Oracle 10g connectivity | host JVM |
+
+**Why this stack:**
+
+- **Oracle 10g** — ผูกกับ KMITL infra ที่ใช้ได้ฟรี; ตัวชอบ Java JDBC (python-oracledb thin requires 12c+)
+- **FastAPI HTTP wrapper** — Airflow Docker image ไม่มี Java; bundle ojdbc8 ทุก container แพง → ห่อ JDBC เป็น HTTP service บน host
+- **Streamlit** — รวดเร็วในการสร้าง analytics UI; ไม่ต้องเขียน frontend แยก
+- **Prophet** — defect forecast time-series; cmdstanpy backend (compile ครั้งแรก ~10 นาที)
 
 ---
 
-## Directory Layout
+## 2. Repository Layout
 
 ```
 unified_iiot_data_architecture/
-├── app/
-│   ├── api/main.py                  # FastAPI: /health, /sql/*, /sp/*, /api/*
-│   └── streamlit/dashboard.py       # 4-tab dashboard
+├── app/                                       # Application layer
+│   ├── __init__.py
+│   ├── api/                                   # FastAPI service (port 8000)
+│   │   ├── main.py                            # FastAPI() + 2 router includes
+│   │   ├── dw_api/                            # Oracle core (Airflow callers)
+│   │   │   ├── deps.py                        # auth + connector singleton + JDBC type coercion + query_rows
+│   │   │   ├── models.py                      # 2 Pydantic models (SpCallRequest, BulkInsertRequest)
+│   │   │   └── operational.py                 # /health + /sp/call + /sql/bulk-insert
+│   │   └── dashboard_api/
+│   │       └── dashboard.py                   # 7 domain endpoints (4 analytics + 2 sensor + 1 scheduling)
+│   │
+│   └── streamlit/                             # Multi-page dashboard (port 8501)
+│       ├── .streamlit/config.toml             # theme + server config (must run from this dir)
+│       ├── dashboard.py                       # Entry: sidebar nav + landing (renders README)
+│       ├── components/
+│       │   ├── api_client.py                  # cached HTTP wrapper (TTL 5 min)
+│       │   ├── cards.py                       # KPI card renderers
+│       │   ├── charts.py                      # 7 Plotly chart builders
+│       │   ├── filters.py                     # 3 page-level filter rows
+│       │   └── prophet_trainer.py             # Prophet train (background thread) + cache + predict
+│       ├── pages/
+│       │   ├── 1_oee_defect.py                # Page 1: OEE + Defect (4 KPI + trend + Pareto + model defect + table)
+│       │   ├── 2_sensor_forecast.py           # Page 2: Sensor forecast (status card + Prophet chart)
+│       │   └── 3_schedule_adherence.py        # Page 3: Schedule (KPI + histogram + trend + Gantt + table)
+│       └── cache/prophet_models/              # Prophet .pkl cache (gitignored)
 │
-├── db_module/
-│   ├── db_conn/                     # OracleConnector / SupabaseConnector / InfluxConnector
+├── db_module/                                 # Database layer
+│   ├── db_conn/                               # 3 connector classes (singleton-friendly)
+│   │   ├── _env.py                            # .env loader + require/get/resolve_path helpers
+│   │   ├── oracle/oracle_connection.py        # OracleConnector — JDBC thin via jaydebeapi/jpype
+│   │   │   └── drivers/ojdbc8.jar             # NOTE: ดาวน์โหลดเอง (gitignored)
+│   │   ├── supabases/supabase_connection.py   # SupabaseConnector — psycopg2 + SSL
+│   │   └── influxdb/influx_connection.py      # InfluxConnector — influxdb-client (Flux)
+│   │
 │   ├── db_sources/
-│   │   ├── supabases_sql_query/
-│   │   │   ├── query/               # 01_schema.sql (6 ตาราง) + 02_master_data.sql
-│   │   │   ├── mock/                # generate_mock_data.py + 03_mock_data.sql
-│   │   │   └── apply_supabase.py    # apply 3 ไฟล์ + audit counts
-│   │   ├── oracle_sql_query/
-│   │   │   ├── query/               # 01_schema.sql + 02-05 (procedures, reporting, truncate)
-│   │   │   ├── run_sql_file.py      # รัน SQL ไฟล์ต่อ Oracle (รองรับ PL/SQL `/` terminator)
-│   │   │   ├── sync_dimensions_from_supabase.py   # seed DIM_MACHINE + DIM_PRODUCT
-│   │   │   └── verify_warehouse_schema.py         # smoke-check 10 table + 5 seq + 4 proc
-│   │   └── iiot_container/          # NodeRED flow (reference only — runs on AWS)
-│   └── pipeline/
-│       ├── Dockerfile               # Airflow 2.8 image (no Java in container)
-│       ├── docker-compose.yml       # postgres-af + scheduler + webserver:8088
+│   │   ├── oracle_sql_query/                  # DW provisioning + admin
+│   │   │   ├── query/                         # 7 SQL files apply ตาม order
+│   │   │   │   ├── 01_schema_dim.sql          # 7 DIM + 4 sequences
+│   │   │   │   ├── 02_schema_fact.sql         # 5 FACT + 5 sequences
+│   │   │   │   ├── 03_schema_staging.sql      # 8 STG (5 OLTP + 3 DIM source)
+│   │   │   │   ├── 04_dim_seed.sql            # MERGE INTO DIM_DATE/SHIFT/METRIC/DEFECT
+│   │   │   │   ├── 05_indexes.sql             # 27 indexes (FK + time-range + composite)
+│   │   │   │   ├── 06_procedure_dim_sync.sql  # 4 SP_SYNC_DIM_*
+│   │   │   │   └── 07_procedure_fact_load.sql # 1 FN + 6 SP_LOAD_FACT_*
+│   │   │   ├── run_sql_file.py                # DDL applier (handles PL/SQL `/` terminator)
+│   │   │   ├── verify_warehouse_schema.py     # checks 20 tables + 9 SEQ + 10 PROC + 1 FN exist
+│   │   │   └── sync_dimensions_from_supabase.py  # CLI DIM sync (alt to nightly DAG)
+│   │   │
+│   │   ├── supabases_sql_query/               # OLTP provisioning + mock data
+│   │   │   ├── query/
+│   │   │   │   ├── 01_schema.sql              # 12-table MES schema
+│   │   │   │   ├── 02_trigger_functions.sql   # 2 trigger fn + 2 triggers (status sync, downtime duration)
+│   │   │   │   ├── 03_master_data.sql         # 1 line + 3 machines + 3 models + lookups
+│   │   │   │   └── 04_mock_data.sql           # generated mock (8-day window)
+│   │   │   ├── apply_supabase.py              # transactional apply 4 files + audit
+│   │   │   └── generate_mock_data.py          # generator for 04_mock_data.sql
+│   │   │
+│   │   └── iiot_container/                    # Edge stack (Node-RED + Mosquitto + Telegraf)
+│   │
+│   └── pipeline/                              # Airflow orchestration
+│       ├── docker-compose.yml                 # Airflow 2.8 stack (scheduler + webserver:8088)
 │       └── airflow/dags/
-│           ├── etl_supabase_to_oracle.py      # production_batch + qc_record → STG
-│           ├── etl_influxdb_to_oracle.py      # 15-min aggregate → STG_SENSOR_AGG
-│           └── sp_load_dw.py                  # chain 3 fact loaders (5-min offset)
+│           ├── _oracle_api.py                 # HTTP helper: bulk_insert, call_sp, health, as_iso
+│           ├── _supabase.py                   # psycopg2 cursor wrapper
+│           ├── etl_supabase_to_oracle.py      # OLTP → STG (4 tasks parallel, every 15 min)
+│           ├── etl_influxdb_to_oracle.py      # Influx → STG_SENSOR_AGG (every 15 min)
+│           ├── sp_load_dw.py                  # call SP_LOAD_ALL_FACTS (5,20,35,50 * * * *)
+│           └── sync_dim_supabase.py           # nightly DIM sync (02:00 UTC)
 │
-├── test/                            # pytest smoke tests (connector round-trips)
-├── claude_track/
-│   ├── PLAN.md                      # authoritative progress tracker
-│   ├── NEW_PLAN.md                  # migration plan (2026-04-19)
-│   └── problems_requirements_erd_mapping.md   # business req + ER diagrams
-├── NEW_ARCHITECTURE.md              # spec ของ design ปัจจุบัน
-└── CLAUDE.md                        # GS-MAD config
+├── markdown/                                  # Project docs + spec files
+│   ├── 1. INFLUXDB.md                         # InfluxDB schema + connector + flow
+│   ├── 1. RECREATE_CODE.md                    # OLTP recreate spec
+│   ├── 2. AS_IS_DW_CODE.md                    # historical snapshot
+│   ├── 2. DOCUMENT_DW_RECREATE.md             # DW recreate execution report
+│   ├── 2. RECREATE_DW.md                      # DW recreate spec
+│   ├── 4. API.md                              # app/ explanation (full)
+│   ├── 5. DASHBOARD_API_AI.md                 # Streamlit build spec
+│   └── dw_schema_compact.sql                  # all 7 SQL files concatenated
+│
+├── test/                                      # Smoke tests (read-only)
+│   ├── test_connection.py                     # 3-layer Oracle probe
+│   ├── test_connectors.py                     # pytest round-trip 3 connectors
+│   └── test_create_table.py                   # Oracle write access (CREATE/INSERT/DROP)
+│
+├── .env                                       # secrets (gitignored)
+├── .env.example                               # template
+├── requirements.txt
+└── README.md                                  # this file
 ```
 
 ---
 
-## Data Flow
+## 3. Data Flow
+
+### 3.1 Ingest (every 15 min)
 
 ```
-┌─────────────┐                              ┌──────────────────┐
-│  Supabase   │                              │  AWS InfluxDB 2  │
-│ (6 OLTP)    │                              │  bucket=iiot_... │
-└──────┬──────┘                              └──────────┬───────┘
-       │ psycopg2                                       │ influxdb-client
-       ▼                                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Airflow (docker compose) — schedule */15 * * * *               │
-│  ─────────────────────────────────────────────                  │
-│  etl_supabase_to_oracle     etl_influxdb_to_oracle              │
-│   └─ extract_production_batch  └─ aggregate_sensor              │
-│   └─ extract_qc_record                                          │
-│         ↓ HTTP bulk-insert (Bearer token)                       │
-└─────────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  FastAPI (uvicorn @ localhost:8000)                             │
-│   Operational: /sql/query /sql/execute /sp/call /sql/bulk-insert│
-│   Dashboard:   /api/production/*  /api/quality/*  /api/sensor/* │
-└─────────────────────────────────────────────────────────────────┘
-                           │ JDBC thin (O3LOGON)
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Oracle 10g (KMITL AI03)                                        │
-│   STG:  STG_PRODUCTION_BATCH · STG_QC_RECORD · STG_SENSOR_AGG   │
-│   DIM:  DIM_DATE · DIM_MACHINE · DIM_PRODUCT · DIM_METRIC       │
-│   FACT: FACT_PRODUCTION · FACT_QUALITY · FACT_SENSOR            │
-│                                                                 │
-│   sp_load_dw (5,20,35,50 * * * *)                               │
-│    └─ SP_LOAD_FACT_PRODUCTION  (merge by batch_src_id)          │
-│    └─ SP_LOAD_FACT_QUALITY     (merge by batch_src_id)          │
-│    └─ SP_LOAD_FACT_SENSOR      (merge by machine+metric+window) │
-└─────────────────────────────────────────────────────────────────┘
-                           │ HTTP (read)
-                           ▼
-┌──────────────────────────────────┐
-│  Streamlit (localhost:8501)      │
-│   Tab 1: Production overview     │
-│   Tab 2: Quality / defect rate   │
-│   Tab 3: Sensor per batch        │
-│   Tab 4: Machine status 15-min   │
-└──────────────────────────────────┘
+[Supabase OLTP]                              [InfluxDB sensor 1Hz]
+   |                                              |
+   | psycopg2                                     | influxdb-client (Flux)
+   v                                              v
+[etl_supabase_to_oracle DAG]                  [etl_influxdb_to_oracle DAG]
+   4 parallel extract tasks                       1 task: aggregateWindow 15m
+   - production_batch + JOIN order              (mean/min/max/count for
+   - qc_record                                    each machine × field)
+   - qc_defect (JOIN qc_record for window)       
+   - downtime_event (JOIN machine + reason)      
+   |                                              |
+   | HTTP POST /sql/bulk-insert (truncate=True)   |
+   v                                              v
+[Oracle STG_*]
+  STG_PRODUCTION_BATCH, STG_QC_RECORD,
+  STG_QC_DEFECT, STG_DOWNTIME_EVENT,
+  STG_SENSOR_AGG
 ```
 
----
+### 3.2 Transform (5 minutes after ingest)
 
-## Prerequisites
-
-ต้องติดตั้งก่อนเริ่ม setup:
-
-| Tool | Version | ใช้ทำ | วิธีติดตั้ง (macOS) |
-|---|---|---|---|
-| **Python** | 3.12 | รัน connector/script/API/dashboard | `brew install python@3.12` |
-| **Java JDK** | 17+ | JVM สำหรับ `jpype` + Oracle JDBC | `brew install openjdk@17` |
-| **Docker Desktop** | — | รัน Airflow stack | [docker.com/desktop](https://www.docker.com/products/docker-desktop/) |
-| **Git** | — | clone repo | `brew install git` |
-
-**Verify ก่อนเริ่ม:**
-
-```bash
-python3.12 --version     # Python 3.12.x
-java -version            # openjdk 17.x
-docker --version         # Docker 24+
-docker compose version   # Compose 2.x
+```
+[sp_load_dw DAG @ 5,20,35,50 * * * *]
+   |
+   | HTTP POST /sp/call {"name":"SP_LOAD_ALL_FACTS"}
+   v
+[Oracle SP_LOAD_ALL_FACTS]
+   PRODUCTION → QUALITY → DEFECT → DOWNTIME → SENSOR
+   each SP: DELETE-by-key + INSERT cursor FOR-LOOP
+            (Oracle 10g forbids SEQ.NEXTVAL ใน INSERT...SELECT)
+   |
+   v
+[Oracle FACT_*]
+  FACT_PRODUCTION (1 row = 1 batch)
+  FACT_QUALITY    (1 row = 1 QC record)
+  FACT_DEFECT     (1 row = 1 defect type per QC, M:N junction)
+  FACT_DOWNTIME   (1 row = 1 closed downtime event)
+  FACT_SENSOR     (1 row = 1 machine × metric × 15-min window)
 ```
 
-**External accounts ต้องเตรียม:**
-- KMITL Oracle AI03 credentials (host/port/service/user/password)
-- Supabase project (host/password — ดูใน dashboard Supabase)
-- AWS InfluxDB endpoint + token (จาก admin IIoT)
+### 3.3 Dimension sync (nightly 02:00 UTC)
 
----
-
-## First-Time Setup (Step-by-Step)
-
-### 1. Python environment
-
-```bash
-git clone <repo-url>
-cd unified_iiot_data_architecture
-
-python3.12 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
+```
+[sync_dim_supabase DAG]
+   3 parallel: extract_production_line / battery_model / machine
+   |
+   v HTTP POST /sql/bulk-insert
+[STG_LINE, STG_BATTERY_MODEL, STG_MACHINE]
+   |
+   v HTTP POST /sp/call SP_SYNC_ALL_DIMS
+[DIM_LINE, DIM_BATTERY_MODEL, DIM_MACHINE]
+   MERGE BY src_id (preserve surrogate keys → FACT FK ไม่ orphan)
 ```
 
-**Verify:**
-```bash
-.venv/bin/python --version                       # Python 3.12.x
-.venv/bin/python -c "import fastapi, streamlit, jaydebeapi; print('OK')"
+### 3.4 Read (real-time)
+
+```
+[Streamlit page]
+   |
+   | requests.get + Bearer token
+   v
+[FastAPI endpoint]
+   |
+   v query_rows(sql, params)  --→ JDBC → Oracle DW
+   v coerce(v) → JSON-safe values
+   |
+   v
+[Streamlit] pd.DataFrame → Plotly chart
 ```
 
 ---
 
-### 2. Oracle JDBC driver
+## 4. Database Layer (`db_module/`)
 
-ต้องมี `ojdbc8.jar` เพื่อเชื่อม Oracle 10g
+### 4.1 Connectors ([`db_module/db_conn/`](db_module/db_conn/))
 
-```bash
-# Download ojdbc8.jar (version 19.23 ขึ้นไป)
-# https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html
-mkdir -p db_module/db_conn/oracle/drivers
-mv ~/Downloads/ojdbc8.jar db_module/db_conn/oracle/drivers/
+3 connector classes สำหรับเชื่อม database 3 ตัว:
 
-ls -la db_module/db_conn/oracle/drivers/ojdbc8.jar
-# ต้องเห็นไฟล์ขนาด ~4.5 MB
-```
-
----
-
-### 3. `.env` file
-
-คัดลอก `.env.example` → `.env` แล้วเติมค่า:
-
-```bash
-cp .env.example .env
-# แก้ไขด้วย editor ที่ถนัด
-code .env   # หรือ vim, nano
-```
-
-**Fields ทั้งหมด:**
-
-```env
-# ========== Oracle AI03 (KMITL) ==========
-ORACLE_HOST=161.246.35.92
-ORACLE_PORT=1521
-ORACLE_SERVICE=orcl
-ORACLE_USER=AI03
-ORACLE_PASSWORD=<ถามอาจารย์/DBA>
-ORACLE_JDBC_JAR=db_module/db_conn/oracle/drivers/ojdbc8.jar
-
-# ORACLE_API_* ใช้โดย Airflow DAG + dashboard
-ORACLE_API_URL=http://localhost:8000
-ORACLE_API_TOKEN=<random string ยาว ๆ เช่น openssl rand -hex 32>
-
-# ========== JVM (สำหรับ jpype บน macOS) ==========
-JAVA_HOME=/opt/homebrew/opt/openjdk@17
-
-# ========== Supabase ==========
-SUPABASE_HOST=db.<project-ref>.supabase.co
-SUPABASE_PORT=5432
-SUPABASE_DB=postgres
-SUPABASE_USER=postgres
-SUPABASE_PASSWORD=<Supabase dashboard → Settings → Database>
-SUPABASE_SSLMODE=require
-
-# ========== InfluxDB 2.0 (AWS) ==========
-INFLUX_URL=http://<ec2-public-ip>:8086
-INFLUX_ORG=factory
-INFLUX_BUCKET=iiot_data_raw
-INFLUX_TOKEN=<InfluxDB UI → Data → API Tokens>
-```
-
-**สำคัญ:** `.env` ถูก `.gitignore` ไว้ ห้าม commit
-
----
-
-### 4. Smoke-test connectors
-
-ก่อนสร้าง schema ให้ทดสอบ credentials ทั้ง 3 ระบบก่อน:
-
-```bash
-.venv/bin/python -m pytest test/test_connectors.py -v
-```
-
-**ควรได้:**
-```
-test_oracle_connector_roundtrip PASSED
-test_supabase_connector_roundtrip PASSED
-test_influx_connector_query PASSED
-```
-
-ถ้าเจอ error → ดู [Troubleshooting](#troubleshooting)
-
----
-
-### 5. สร้าง Supabase schema + mock data
-
-Supabase ต้องมี 6 ตาราง + master data + mock batches ก่อน (เพราะ Oracle จะ sync DIM จาก Supabase)
-
-```bash
-# 5.1 Generate mock SQL (window ตรงกับ InfluxDB live data)
-.venv/bin/python db_module/db_sources/supabases_sql_query/mock/generate_mock_data.py
-```
-
-**Output ควรเห็น:**
-```
-Wrote db_module/db_sources/supabases_sql_query/mock/03_mock_data.sql
-  Window: 2026-04-18 04:30:00 → 2026-04-18 20:00:00 UTC
-  production_order     3
-  production_batch     6   (5 finished, 1 in-progress)
-  qc_record            5
-```
-
-> หมายเหตุ: window ของ mock ควรทับกับช่วงเวลาที่ InfluxDB มีข้อมูลจริง
-> (สคริปต์ hardcode `2026-04-18 04:30-20:00 UTC` ตามข้อมูลที่ NodeRED inject)
-> ถ้า InfluxDB เปลี่ยน window ต้องแก้ `generate_mock_data.py`
-
-```bash
-# 5.2 Apply 3 ไฟล์ SQL เข้า Supabase (schema + master + mock ใน transaction เดียว)
-.venv/bin/python db_module/db_sources/supabases_sql_query/apply_supabase.py
-```
-
-**Output:**
-```
-[apply] query/01_schema.sql (~4 KB)
-[apply] query/02_master_data.sql (~2 KB)
-[apply] mock/03_mock_data.sql (~2 KB)
-OK — all files applied and committed.
-
-Row counts:
-  production_line               1
-  machine                       3
-  product                       3
-  production_order              3
-  production_batch              6
-  qc_record                     5
-```
-
----
-
-### 6. สร้าง Oracle DW schema
-
-```bash
-# 6.1 Schema (3 STG + 4 DIM + 3 FACT + 5 sequences + DIM_METRIC seed)
-.venv/bin/python db_module/db_sources/oracle_sql_query/run_sql_file.py \
-    db_module/db_sources/oracle_sql_query/query/01_schema.sql
-
-# 6.2 Stored procedure สำหรับ DIM_DATE
-.venv/bin/python db_module/db_sources/oracle_sql_query/run_sql_file.py \
-    db_module/db_sources/oracle_sql_query/query/02_procedure_dim_date.sql
-
-# 6.3 Fact loader procedures (3 ตัว — merge by key)
-.venv/bin/python db_module/db_sources/oracle_sql_query/run_sql_file.py \
-    db_module/db_sources/oracle_sql_query/query/03_procedure_fact_loaders.sql
-```
-
-**Verify:**
-```bash
-.venv/bin/python db_module/db_sources/oracle_sql_query/verify_warehouse_schema.py
-```
-
-**ควรเห็น 10 ✓ tables + 5 ✓ sequences + 4 ✓ procedures:**
-```
-Tables in AI03: 10
-  ✓ STG_PRODUCTION_BATCH
-  ✓ STG_QC_RECORD
-  ✓ STG_SENSOR_AGG
-  ✓ DIM_DATE
-  ✓ DIM_MACHINE
-  ...
-
-OK — all expected objects present.
-```
-
----
-
-### 7. Seed DIM tables
-
-`DIM_METRIC` ถูก seed ตอนรัน `01_schema.sql` แล้ว (6 rows)
-
-ต้อง populate เพิ่ม:
-- **DIM_DATE** — calendar 1 ปี
-- **DIM_MACHINE / DIM_PRODUCT** — sync จาก Supabase
-
-```bash
-# 7.1 DIM_DATE: 365 วัน เริ่ม 2026-01-01
-.venv/bin/python -c "
-from db_module.db_conn import OracleConnector
-conn = OracleConnector().connect()
-cur = conn.cursor()
-cur.execute(\"BEGIN SP_LOAD_DIM_DATE(DATE '2026-01-01', 365); END;\")
-conn.commit()
-cur.execute('SELECT COUNT(*) FROM DIM_DATE')
-print('DIM_DATE rows:', int(cur.fetchone()[0]))
-cur.close(); conn.close()
-"
-```
-
-**ควรได้:** `DIM_DATE rows: 365`
-
-```bash
-# 7.2 DIM_MACHINE + DIM_PRODUCT: sync จาก Supabase
-.venv/bin/python db_module/db_sources/oracle_sql_query/sync_dimensions_from_supabase.py
-```
-
-**Output:**
-```
-  DIM_MACHINE  loaded 3 rows
-  DIM_PRODUCT  loaded 3 rows
-
-Oracle dim readback:
-  DIM_MACHINE   3
-  DIM_PRODUCT   3
-  DIM_METRIC    6
-  DIM_DATE      365
-```
-
----
-
-### 8. Start services
-
-จำเป็นต้อง start 3 services:
-
-```bash
-# 8.1 FastAPI (background)
-.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
-
-# 8.2 Airflow stack (Docker)
-cd db_module/pipeline
-docker compose up -d
-cd -
-
-# รอ Airflow พร้อม (~30 วินาที)
-sleep 30
-
-# 8.3 Streamlit dashboard
-.venv/bin/streamlit run app/streamlit/dashboard.py --server.port 8501 &
-```
-
-**Verify ทีละ service:**
-
-```bash
-# FastAPI: ใช้ TOKEN จาก .env
-TOKEN=$(grep ORACLE_API_TOKEN .env | cut -d= -f2 | tr -d '"')
-curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/health
-# ต้องได้: {"status":"ok","oracle_user":"AI03",...}
-
-# Airflow: ดู status container
-docker compose -f db_module/pipeline/docker-compose.yml ps
-# ต้องเห็น scheduler + webserver + postgres-af = Up (healthy)
-
-# Streamlit
-curl -s http://localhost:8501/_stcore/health
-# ต้องได้: ok
-```
-
----
-
-### 9. Trigger first ETL run
-
-Airflow DAG จะรันอัตโนมัติทุก 15 นาที แต่สำหรับครั้งแรกให้ trigger manual เพื่อทดสอบ
-
-**ใน Airflow UI (http://localhost:8088, admin/admin):**
-1. เปิด DAG `etl_supabase_to_oracle` → กด toggle pause off → กด "Trigger DAG"
-2. เปิด DAG `etl_influxdb_to_oracle` → เหมือนกัน
-3. รอ ~1 นาที → เปิด DAG `sp_load_dw` → trigger
-
-**หรือจาก CLI:**
-
-```bash
-COMPOSE=db_module/pipeline/docker-compose.yml
-
-# Run Supabase extract (test single task)
-docker compose -f $COMPOSE exec -T airflow-scheduler \
-    airflow tasks test etl_supabase_to_oracle extract_production_batch 2026-04-18T12:00:00
-
-docker compose -f $COMPOSE exec -T airflow-scheduler \
-    airflow tasks test etl_supabase_to_oracle extract_qc_record 2026-04-18T12:00:00
-
-# Run Influx extract (override window ให้ครอบทั้งวัน)
-docker compose -f $COMPOSE exec -T -e INFLUX_RANGE_START=2026-04-18T04:00:00Z \
-    airflow-scheduler airflow tasks test etl_influxdb_to_oracle \
-    aggregate_sensor 2026-04-18T12:00:00
-
-# Run SPs to populate FACT
-for sp in sp_load_fact_production sp_load_fact_quality sp_load_fact_sensor; do
-  docker compose -f $COMPOSE exec -T airflow-scheduler \
-      airflow tasks test sp_load_dw $sp 2026-04-18
-done
-```
-
-**Verify row counts:**
-```bash
-.venv/bin/python -c "
-from db_module.db_conn import OracleConnector
-c = OracleConnector()
-with c.cursor() as cur:
-    for t in ['STG_PRODUCTION_BATCH', 'STG_QC_RECORD', 'STG_SENSOR_AGG',
-              'FACT_PRODUCTION', 'FACT_QUALITY', 'FACT_SENSOR']:
-        cur.execute(f'SELECT COUNT(*) FROM {t}')
-        print(f'{t:<22} {int(cur.fetchone()[0])}')
-"
-```
-
-**ควรเห็น FACT_SENSOR > 100, FACT_PRODUCTION = 5, FACT_QUALITY = 5**
-
----
-
-### 10. เปิด dashboard
-
-```
-http://localhost:8501
-```
-
-**ควรเห็น:**
-- Sidebar: date picker แสดง `2026-04-18`
-- Tab 1 (Production): 4 KPI cards (Total Batches=5, Total Output, Avg Yield, Avg Duration) + ตาราง 5 batch
-- Tab 2 (Quality): Defect rate
-- Tab 3 (Sensor per Batch): เลือก batch → line chart sensor ราย 15 นาที
-- Tab 4 (Machine Status): line chart machine_state_num 15 นาทีต่อเครื่อง
-
----
-
-## Daily Operations
-
-### Start stack ปกติ (หลัง first-time setup เสร็จแล้ว)
-
-```bash
-# FastAPI
-.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
-
-# Airflow (ปกติ running ค้างใน Docker อยู่แล้ว — restart ถ้าต้องการ)
-docker compose -f db_module/pipeline/docker-compose.yml up -d
+#### `OracleConnector` — [`oracle/oracle_connection.py`](db_module/db_conn/oracle/oracle_connection.py)
 
-# Streamlit
-.venv/bin/streamlit run app/streamlit/dashboard.py &
-```
+JDBC thin driver via jaydebeapi + jpype. ทำไม:
 
-### Stop stack
+- Oracle 10.2.0.3 เก่ากว่าที่ python-oracledb thin-mode รองรับ (12c+)
+- ARM64 (Apple Silicon) ไม่มี Instant Client build
 
-```bash
-pkill -f "uvicorn app.api"
-pkill -f "streamlit run"
-docker compose -f db_module/pipeline/docker-compose.yml stop
-```
+**JVM startup args** (`_JVM_ARGS`):
+- `thinLogonCapability=o3` — บังคับ ojdbc8 รองรับ 10g
+- `disableOob=true` — ปิด Out-of-Band breaks
+- `user.language=en, user.country=US` — บังคับ Gregorian + ENGLISH (กัน Buddhist year)
 
-### Refresh mock data (regenerate + reapply)
+**ALTER SESSION** (`_SESSION_NLS_STATEMENTS`) ทุก connection:
+- `NLS_CALENDAR='GREGORIAN'`
+- `NLS_DATE_LANGUAGE='ENGLISH'`
+- `NLS_DATE_FORMAT='YYYY-MM-DD HH24:MI:SS'`
 
-```bash
-.venv/bin/python db_module/db_sources/supabases_sql_query/mock/generate_mock_data.py
-.venv/bin/python db_module/db_sources/supabases_sql_query/apply_supabase.py
-```
+**Lifecycle:**
+- JVM start ครั้งเดียวต่อ process (jpype constraint — classpath freeze หลัง start)
+- Connection autocommit=False → ต้อง commit/rollback เอง
+- `cursor()` context manager จัดการ commit/rollback อัตโนมัติ
 
-### Truncate และ reload DW ทั้งหมด
+#### `SupabaseConnector` — [`supabases/supabase_connection.py`](db_module/db_conn/supabases/supabase_connection.py)
 
-```bash
-# 1. ล้าง FACT + DIM_MACHINE/PRODUCT (เก็บ DIM_DATE + DIM_METRIC)
-.venv/bin/python db_module/db_sources/oracle_sql_query/run_sql_file.py \
-    db_module/db_sources/oracle_sql_query/query/05_truncate_and_reload.sql
+psycopg2 + SSL (require). Connection params จาก `.env`:
+- `SUPABASE_HOST` (e.g. `db.<ref>.supabase.co`) — IPv6 only
+- `SUPABASE_PORT=5432`, `SUPABASE_USER=postgres`, `SUPABASE_PASSWORD`
+- `SUPABASE_SSLMODE=require`
 
-# 2. Re-seed DIM จาก Supabase
-.venv/bin/python db_module/db_sources/oracle_sql_query/sync_dimensions_from_supabase.py
+#### `InfluxConnector` — [`influxdb/influx_connection.py`](db_module/db_conn/influxdb/influx_connection.py)
 
-# 3. Trigger DAG หรือ SP ใหม่
-# (ดู step 9 ของ first-time setup)
-```
+Wrapper บาง ๆ บน `influxdb_client.InfluxDBClient`:
+- `query(flux: str)` → `list[FluxTable]` (ไม่ flatten เป็น DataFrame)
+- `client()` context manager สำหรับ raw API access (write_api, delete_api)
 
-### Backfill หลายวัน
+**Env:**
+- `INFLUX_URL` (e.g. `http://<ec2>:8086`), `INFLUX_TOKEN` (required)
+- `INFLUX_ORG=factory`, `INFLUX_BUCKET=iiot_data_raw` (defaults)
 
-ในกรณีต้องการ populate FACT หลายวัน ต้อง run SP ต่อวัน:
+### 4.2 Oracle DW provisioning ([`db_module/db_sources/oracle_sql_query/`](db_module/db_sources/oracle_sql_query/))
 
-```bash
-TOKEN=$(grep ORACLE_API_TOKEN .env | cut -d= -f2 | tr -d '"')
-for d in 2026-04-18 2026-04-19; do
-  for sp in SP_LOAD_FACT_PRODUCTION SP_LOAD_FACT_QUALITY SP_LOAD_FACT_SENSOR; do
-    curl -s -X POST http://localhost:8000/sp/call \
-      -H "Authorization: Bearer $TOKEN" \
-      -H "Content-Type: application/json" \
-      -d "{\"name\":\"$sp\",\"args\":[\"$d\"]}"
-    echo ""
-  done
-done
-```
+#### `query/` — 7 SQL files (apply order)
 
----
+| # | File | Creates |
+|---|---|---|
+| 01 | `01_schema_dim.sql` | 7 DIM tables + 4 sequences (DIM_DATE/SHIFT/METRIC ใช้ smart key ไม่มี SEQ) |
+| 02 | `02_schema_fact.sql` | 5 FACT tables + 5 sequences |
+| 03 | `03_schema_staging.sql` | 8 STG tables (5 OLTP staging + 3 DIM source staging) |
+| 04 | `04_dim_seed.sql` | DECLARE block (DIM_DATE 1827 rows) + MERGE INTO DIM_SHIFT/METRIC/DEFECT_TYPE |
+| 05 | `05_indexes.sql` | 27 indexes (FK + time-range + composite lookup) |
+| 06 | `06_procedure_dim_sync.sql` | 3 `SP_SYNC_DIM_*` + 1 `SP_SYNC_ALL_DIMS` master |
+| 07 | `07_procedure_fact_load.sql` | `FN_GET_SHIFT_ID` + 5 `SP_LOAD_FACT_*` + `SP_LOAD_ALL_FACTS` master |
 
-## Service Management
+**Notable design:**
 
-### Check running services
+- **DIM_DATE smart key** = `YYYYMMDD` integer (no surrogate, no SEQ) — JOIN `fact.date_id = dim.date_id` natural
+- **`v_curr_date` variable** ใน 04_dim_seed (renamed จาก `current_date` ที่ชนกับ Oracle built-in `CURRENT_DATE` ใน SQL context)
+- **MERGE BY src_id** ใน SP_SYNC_DIM_* — preserve surrogate key เสถียรข้าม sync
+- **DELETE-by-key + Cursor FOR-LOOP** ใน SP_LOAD_FACT_* — Oracle 10g forbids `SEQ.NEXTVAL ใน INSERT...SELECT`
+- **Flag pattern** แทน `CONTINUE` keyword (Oracle 10g ไม่มี)
 
-```bash
-# Python processes
-pgrep -af "uvicorn app.api"          # FastAPI
-pgrep -af "streamlit run"            # Streamlit
-
-# Docker
-docker compose -f db_module/pipeline/docker-compose.yml ps
-
-# Airflow DAG status
-docker compose -f db_module/pipeline/docker-compose.yml exec -T airflow-scheduler \
-    airflow dags list | grep -E "etl_|sp_load"
-```
-
-### Restart ทุกอย่าง
-
-```bash
-pkill -f "uvicorn app.api"; pkill -f "streamlit run"; sleep 2
-docker compose -f db_module/pipeline/docker-compose.yml restart
-.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
-.venv/bin/streamlit run app/streamlit/dashboard.py &
-```
-
-### Ports
-
-| Port | Service |
-|---|---|
-| 8000 | FastAPI (uvicorn) |
-| 8088 | Airflow webserver |
-| 8501 | Streamlit |
-
----
-
-## Troubleshooting
-
-### ❌ `401 Unauthorized` ที่ dashboard
-
-**Cause:** `ORACLE_API_TOKEN` ไม่ถูกโหลดเข้า Streamlit
-
-**Fix:** dashboard โหลด `.env` อัตโนมัติอยู่แล้ว ตรวจว่า
-- `.env` ที่ repo root มีบรรทัด `ORACLE_API_TOKEN=xxx` (ไม่เว้นว่าง)
-- Streamlit process start จาก directory ของโปรเจกต์
-
-### ❌ `Cannot reach API` ที่ dashboard
-
-**Cause:** FastAPI ยังไม่ start
-
-**Fix:**
-```bash
-.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
-sleep 3
-curl http://localhost:8000/health    # ต้อง 401 (ไม่มี token) หรือ 200
-```
-
-### ❌ `JVM DLL not found` หรือ `JAVA_HOME` error
-
-**Cause:** jpype หา JVM ไม่เจอ
-
-**Fix:**
-```bash
-# macOS (Apple Silicon)
-brew install openjdk@17
-echo 'JAVA_HOME=/opt/homebrew/opt/openjdk@17' >> .env
-```
-
-### ❌ `ORA-12543: TNS:destination host unreachable`
-
-**Cause:** KMITL network ไม่ถึง (ไม่ได้อยู่ใน network / VPN / firewall block)
-
-**Fix:**
-- ต้องอยู่ใน KMITL network (campus wifi / VPN)
-- ตรวจ `ORACLE_HOST` ใน `.env` ตรง
-
-### ❌ Supabase connection timeout (IPv6)
-
-**Cause:** `db.<ref>.supabase.co` เป็น IPv6-only host บาง ISP ไม่รองรับ IPv6
-
-**Fix option 1** — ใช้ Supabase connection pooler (IPv4):
-```env
-SUPABASE_HOST=aws-0-<region>.pooler.supabase.com
-SUPABASE_PORT=6543
-```
-
-**Fix option 2** — Airflow container ใช้ IPv6 network (compose ทำให้แล้ว ดู `enable_ipv6: true`)
-
-### ❌ `ValueError: unconverted data remains... ".445810"` ที่ dashboard
-
-**Cause:** Oracle TIMESTAMP บางแถวมี microseconds บางแถวไม่มี → pandas ล้ม
-
-**Fix:** แก้ไปแล้วใน `dashboard.py` — ใช้ `pd.to_datetime(..., format="mixed")`
-
-### ❌ `ORA-02287: sequence number not allowed here`
-
-**Cause:** Oracle 10g ห้าม `SEQ.NEXTVAL` ใน `INSERT...SELECT`
-
-**Fix:** ใช้ cursor loop + row-by-row INSERT (ดูตัวอย่างใน `SP_LOAD_FACT_PRODUCTION`)
-
-### ❌ Airflow DAG `host.docker.internal: Name or service not known`
-
-**Cause:** `ORACLE_API_URL` ใน `.env` ใช้ `localhost` ซึ่งใน container หมายถึง container เอง
-
-**Fix:** `docker-compose.yml` ตั้ง `ORACLE_API_URL=http://host.docker.internal:8000` ใน `environment:` override อยู่แล้ว — ตรวจว่ายัง intact
-
-### ❌ Mock window ไม่ตรงกับ InfluxDB data
-
-**Cause:** InfluxDB live data เปลี่ยน range (NodeRED หยุด หรือ simulate window ใหม่)
-
-**Fix:** ตรวจ InfluxDB:
-```bash
-.venv/bin/python -c "
-from db_module.db_conn import InfluxConnector
-c = InfluxConnector()
-for label, flux in [('first', 'from(bucket:\"iiot_data_raw\") |> range(start: 0) |> first()'),
-                     ('last',  'from(bucket:\"iiot_data_raw\") |> range(start: 0) |> last()')]:
-    tables = c.query(flux)
-    for table in tables:
-        for r in table.records:
-            print(label, r.get_time()); break
-        break
-"
-```
-
-แล้วแก้ `INFLUX_EARLIEST` / `INFLUX_LATEST` ใน `generate_mock_data.py` ให้ตรง
-
----
-
-## Scripts Reference
+#### Provisioning scripts
 
 | Script | Purpose |
 |---|---|
-| `run_sql_file.py <path>` | รัน SQL file ต่อ Oracle (รองรับ PL/SQL `/` terminator) |
-| `sync_dimensions_from_supabase.py` | ดึง master จาก Supabase → DIM_MACHINE + DIM_PRODUCT |
-| `verify_warehouse_schema.py` | assertion 10 tables + 5 sequences + 4 procedures |
-| `apply_supabase.py` | apply 3 ไฟล์ SQL เข้า Supabase ใน transaction เดียว |
-| `generate_mock_data.py` | สร้าง mock batch/qc ตรง window ของ InfluxDB live |
+| [`run_sql_file.py`](db_module/db_sources/oracle_sql_query/run_sql_file.py) | Apply 1 SQL file ทีละ statement; แยก plain SQL (`;`) จาก PL/SQL block (`/`); fail-fast + rollback |
+| [`verify_warehouse_schema.py`](db_module/db_sources/oracle_sql_query/verify_warehouse_schema.py) | Smoke test: 20 tables + 9 sequences + 10 procs + 1 fn ครบ |
+| [`sync_dimensions_from_supabase.py`](db_module/db_sources/oracle_sql_query/sync_dimensions_from_supabase.py) | One-shot CLI DIM sync (`STG_LINE/MODEL/MACHINE` bulk_insert + `SP_SYNC_ALL_DIMS`); alternative ของ DAG |
 
-### FastAPI Endpoints (สำหรับ dashboard)
+### 4.3 Supabase OLTP provisioning ([`db_module/db_sources/supabases_sql_query/`](db_module/db_sources/supabases_sql_query/))
 
-ทุก endpoint ต้องส่ง `Authorization: Bearer $ORACLE_API_TOKEN`
-
-| Endpoint | Params | Purpose |
+| # | File | Creates |
 |---|---|---|
-| `GET /api/production/available-dates` | — | วันที่มีข้อมูลใน FACT (สำหรับ date picker) |
-| `GET /api/production/by-batch` | `date=YYYY-MM-DD` | list ทุก batch + yield + duration |
-| `GET /api/production/summary` | `date=YYYY-MM-DD` | KPI รวม (total batches, avg yield, etc.) |
-| `GET /api/production/per-machine-15min` | `date=YYYY-MM-DD` | RUNNING/FAULT ต่อเครื่องต่อ window |
-| `GET /api/quality/defect-rate` | `date=YYYY-MM-DD` | Defect overall + per batch |
-| `GET /api/sensor/available-metrics` | — | 6 metrics จาก DIM_METRIC |
-| `GET /api/sensor/by-batch` | `batch_src_id=N` | Sensor param ของ batch ราย 15 นาที |
-| `GET /api/sensor/by-machine-15min` | `date=YYYY-MM-DD&metric=NAME` | Sensor ราย 15 นาที per machine |
+| 01 | `query/01_schema.sql` | 12 tables: production_line, machine, battery_model, defect_type, batch_status, event_reason, production_order, production_batch, batch_status_event, qc_record, qc_defect, downtime_event |
+| 02 | `query/02_trigger_functions.sql` | 2 PostgreSQL trigger functions: `fn_sync_batch_status` (อัพเดท status/start_time/end_time จาก batch_status_event) + `fn_compute_downtime_duration` (auto-fill duration_min) + 2 CREATE TRIGGER |
+| 03 | `query/03_master_data.sql` | 1 line + 3 machines (M01/M02/M03) + 3 battery models + 7 batch_status + 10 event_reasons + 20 defect_types |
+| 04 | `mock/04_mock_data.sql` | Generated 8-day mock (373 batches × ~3.4 events/batch + 373 QC records + 29 defects + 26 downtime) |
 
-### Operational Endpoints
+**Scripts:**
+- [`apply_supabase.py`](db_module/db_sources/supabases_sql_query/apply_supabase.py) — transactional apply 4 files + audit row counts
+- [`generate_mock_data.py`](db_module/db_sources/supabases_sql_query/generate_mock_data.py) — generator (2-shift continuous, weighted product mix, beta-distributed yield)
 
-| Endpoint | Method | Body/Params |
+---
+
+## 5. Application Layer (`app/`)
+
+### 5.1 FastAPI Service ([`app/api/`](app/api/))
+
+**Run:**
+```bash
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+```
+
+**Layout:**
+```
+app/api/
+├── main.py                     FastAPI() + 2 router includes
+├── dw_api/                     Oracle core (Airflow callers use these)
+│   ├── deps.py                 4 หน้าที่: auth, connector, JDBC coercion, query helper
+│   ├── models.py               Pydantic: SpCallRequest, BulkInsertRequest
+│   └── operational.py          /health, /sp/call, /sql/bulk-insert
+└── dashboard_api/
+    └── dashboard.py            Streamlit-facing endpoints (7 routes)
+```
+
+#### `deps.py` — 4 Responsibilities
+
+##### a) Auth — `require_token()`
+```python
+def require_token(authorization: str | None = Header(default=None)) -> None:
+    expected = env_get("ORACLE_API_TOKEN")
+    if not expected:                         # dev mode: empty token = skip
+        return
+    if authorization != f"Bearer {expected}":
+        raise HTTPException(401)
+```
+ใช้เป็น `Depends(require_token)` ที่ router level (gate ครั้งเดียว ทุก endpoint)
+
+##### b) Connection singleton — `get_connector()`
+```python
+_connector: OracleConnector | None = None
+def get_connector():
+    global _connector
+    if _connector is None:
+        _connector = OracleConnector()       # lazy init: starts JVM
+    return _connector
+```
+JVM start ครั้งเดียวต่อ process — เปลี่ยน `ORACLE_JDBC_JAR` ต้อง restart uvicorn
+
+##### c) JDBC type coercion (2 ทิศทาง)
+
+**Response — JDBC value → JSON-safe** (`coerce`):
+- date/datetime/time → `isoformat()`
+- bool/int/float/str → as-is
+- java.lang.String/อื่น → `str(v)`
+
+**Request — ISO string → java.sql.\*** (`parse_iso`):
+- `^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}` → `JTimestamp.valueOf(...)` via jpype
+- `^\d{4}-\d{2}-\d{2}$` → `JDate.valueOf(...)` via jpype
+
+`OraclePreparedStatement.setObject(int, datetime.date)` ไม่มี overload — ต้องส่ง java.sql.Date object
+
+##### d) Query helper — `query_rows(sql, params=None) -> list[dict]`
+- Open-close connection ทุก call (ยังไม่มี pool)
+- Lower-case column names (Streamlit อ่าน `row["batch_src_id"]`)
+- ใช้ทุก endpoint ใน `dashboard.py`
+
+#### `operational.py` — 3 Generic Endpoints (Airflow uses)
+
+| Method | Path | Used by |
 |---|---|---|
-| `/health` | GET | — |
-| `/sql/query` | POST | `{"sql": "SELECT ...", "params": [...]}` |
-| `/sql/execute` | POST | `{"sql": "INSERT/UPDATE ...", "params": [...]}` |
-| `/sp/call` | POST | `{"name": "SP_NAME", "args": [...]}` |
-| `/sql/bulk-insert` | POST | `{"table": "T", "columns": [...], "rows": [[...]], "truncate": true}` |
+| `GET` | `/health` | every DAG (`check_oracle_api` task) |
+| `POST` | `/sp/call` `{name, args}` | sp_load_dw, sync_dim_supabase |
+| `POST` | `/sql/bulk-insert` `{table, columns, rows, truncate, pipeline_run_id}` | etl_supabase, etl_influxdb, sync_dim_supabase |
 
----
+#### `dashboard.py` — 7 Domain Endpoints (Streamlit uses)
 
-## Key Design Notes
+##### Sensor (Page 2)
+- `GET /api/sensor/available-metrics` → DIM_METRIC list (dropdown source)
+- `GET /api/sensor/by-machine-15min?date&metric` → 15-min windows for line chart
 
-- **Oracle 10g compatibility:** ห้ามใช้ `GENERATED AS IDENTITY` — ทุก surrogate PK ใช้ `SEQUENCE` + `NEXTVAL`
-- **15-min merge-by-key SPs:** DELETE ตาม key (batch_src_id หรือ window_start) ไม่ใช่ `date_id` ไม่งั้นจะล้าง FACT ทั้งวัน
-- **Machine name = InfluxDB tag:** `machine.name` ใน Supabase + `DIM_MACHINE.machine_name` ต้องเป็น `"M01"/"M02"/"M03"` ตรงกับ `machine_id` tag ใน InfluxDB
-- **Degenerate dimensions:** `batch_src_id`, `order_src_id` ใน FACT_PRODUCTION/QUALITY เก็บ business key โดยไม่มี DIM_* ของตัวเอง
-- **DIM_METRIC seed-in-schema:** 6 sensor metric hardcode ใน `01_schema.sql` — เพิ่ม sensor ใหม่ = INSERT row ไม่แตะ schema อื่น
-- **Locale trap:** Thai-locale JVM จะแปลง Gregorian 2026 → Buddhist 2569 ผ่าน `java.sql.Date.valueOf()` → `OracleConnector._JVM_ARGS` บังคับ `-Duser.language=en -Duser.country=US` และทุก session รัน `ALTER SESSION SET NLS_CALENDAR='GREGORIAN'`
+##### Scheduling (Page 3)
+- `GET /api/scheduling/batch-timeline?order_id` → planned vs actual per batch (Gantt drilldown)
 
----
+##### Analytics (replace Oracle views — AI03 lacks `CREATE VIEW` privilege)
 
-## Testing
+| Endpoint | Replaces | Used by |
+|---|---|---|
+| `GET /api/analytics/oee-daily?period` | `V_OEE_DAILY` | Page 1 |
+| `GET /api/analytics/defect-pareto?period` | `V_DEFECT_PARETO` | Page 1 |
+| `GET /api/analytics/schedule-adherence?period` | `V_SCHEDULE_ADHERENCE` | Page 3 |
+| `GET /api/analytics/batch-features` | `V_BATCH_FEATURES` (ML feature matrix) | Page 1 + ML pipeline |
 
-### Connector smoke tests
+`_period_to_start_date_id(period)` แปลง string ("Today" / "This week" / "Last 7 days" / "Last 30 days") → `date_id` (YYYYMMDD)
 
+### 5.2 Streamlit Dashboard ([`app/streamlit/`](app/streamlit/))
+
+**Run** (จาก `app/streamlit/` เพื่อให้ `.streamlit/config.toml` ถูกอ่าน):
 ```bash
-.venv/bin/python -m pytest test/ -v
+cd app/streamlit && ../../.venv/bin/streamlit run dashboard.py
 ```
 
-ต้องได้ `3 passed` (Oracle + Supabase + InfluxDB round-trip)
+**`dashboard.py`** — Entry point:
+- Sidebar: project info + nav + FastAPI status indicator (live `/health` check)
+- Landing: render embedded README.md content
 
-### Oracle write access
+**`components/`**
 
-```bash
-.venv/bin/python test/test_create_table.py
-```
-
-### DAG task (end-to-end)
-
-```bash
-docker compose -f db_module/pipeline/docker-compose.yml exec -T airflow-scheduler \
-    airflow tasks test etl_supabase_to_oracle extract_production_batch 2026-04-18T12:00:00
-```
-
-### Check FACT counts after a run
-
-```bash
-.venv/bin/python -c "
-from db_module.db_conn import OracleConnector
-c = OracleConnector()
-with c.cursor() as cur:
-    for t in ['FACT_PRODUCTION', 'FACT_QUALITY', 'FACT_SENSOR']:
-        cur.execute(f'SELECT COUNT(*) FROM {t}')
-        print(f'{t}: {int(cur.fetchone()[0])}')
-"
-```
-
----
-
-## Progress & Planning
-
-| เอกสาร | เนื้อหา |
+| Module | Role |
 |---|---|
-| [`claude_track/PLAN.md`](claude_track/PLAN.md) | progress tracker หลัก — phase 0-7 เก่า + migration 2026-04-19 |
-| [`claude_track/NEW_PLAN.md`](claude_track/NEW_PLAN.md) | migration plan 10 phase (destructive cleanup → rewrite → test) |
-| [`claude_track/problems_requirements_erd_mapping.md`](claude_track/problems_requirements_erd_mapping.md) | business requirement + OLTP ER + DW ER + mapping |
-| [`NEW_ARCHITECTURE.md`](NEW_ARCHITECTURE.md) | schema spec ปัจจุบัน |
-| [`CLAUDE.md`](CLAUDE.md) | GS-MAD methodology + slash commands |
+| `api_client.py` | `@st.cache_data(ttl=300)` HTTP wrapper; Bearer token จาก `.env` |
+| `cards.py` | `kpi_card()`, `kpi_row()`, `status_badge()` — KPI rendering |
+| `charts.py` | 7 Plotly builders: oee_trend, defect_pareto, defect_rate_by_model, forecast, slippage_histogram, slippage_trend, batch_gantt |
+| `filters.py` | `period_selector()` + 3 filter rows (oee_defect / forecast / schedule) |
+| `prophet_trainer.py` | `trigger_training()` (background daemon thread) + `model_status()` + `predict()` — Prophet 1.3.0 |
+
+**`pages/`**
+
+| Page | Layout |
+|---|---|
+| `1_oee_defect.py` | filters → 4 KPI cards (OEE/Avail/Perf/Quality) → OEE trend chart → Defect Pareto → Defect rate by model → detail table |
+| `2_sensor_forecast.py` | filters → status card → forecast chart (history + forecast + confidence band + threshold + "now" line) |
+| `3_schedule_adherence.py` | filters → 4 KPI cards (Total/On-time/Minor late/Late) → 2-column (histogram + trend) → Gantt drilldown → batch detail table |
+
+**Notable Plotly workarounds:**
+- `pd.to_datetime(..., format="mixed")` — Oracle TIMESTAMP some rows have fractional seconds, some don't
+- `add_vline` + `add_annotation` แยก call (Plotly + pandas 2.x bug: `_mean(x)` ทำ `0 + datetime` → TypeError)
 
 ---
 
-## Business Requirements (POC)
+## 6. Pipeline Layer (Airflow)
 
-ลูกค้า (SI scenario) ต้องการ dashboard สำหรับ General Manager ที่:
+**Stack:** Apache Airflow 2.8 in Docker compose ([`db_module/pipeline/docker-compose.yml`](db_module/pipeline/docker-compose.yml))
 
-1. Refresh ทุก 15 นาที
-2. แสดง production ของ 3 เครื่อง (M01/M02/M03) แยก + รวม
-3. แสดง defect rate (QC สุ่ม 5% ของ qty_out ต่อ batch)
-4. แสดง sensor parameter ต่อ batch ราย 15 นาที
-5. แสดง machine status (RUNNING/FAULT) จาก `machine_state_num`
+**UI:** <http://localhost:8088> (login: `airflow / airflow`)
 
-รายละเอียดเพิ่มเติมใน [claude_track/problems_requirements_erd_mapping.md](claude_track/problems_requirements_erd_mapping.md)
+### DAGs
+
+| DAG | Schedule | Tasks | Description |
+|---|---|---|---|
+| `etl_supabase_to_oracle` | `*/15 * * * *` | 4 parallel after healthcheck | OLTP → STG (4 tables) |
+| `etl_influxdb_to_oracle` | `*/15 * * * *` | 1 task after healthcheck | Influx Flux → STG_SENSOR_AGG (with metric/machine validation) |
+| `sp_load_dw` | `5,20,35,50 * * * *` | 1 task | Call `SP_LOAD_ALL_FACTS` master orchestrator |
+| `sync_dim_supabase` | `0 2 * * *` (nightly UTC) | 3 parallel + 1 convergence | DIM sync (LINE/MODEL/MACHINE) via STG + `SP_SYNC_ALL_DIMS` |
+
+### Helper modules
+
+- [`_oracle_api.py`](db_module/pipeline/airflow/dags/_oracle_api.py) — HTTP helpers: `health()`, `bulk_insert()`, `call_sp()`, `as_iso()`
+- [`_supabase.py`](db_module/pipeline/airflow/dags/_supabase.py) — `supabase_cursor()` context manager (psycopg2)
+
+### Schema rename note (2026-04-26)
+
+| Old | New |
+|---|---|
+| `product_id` | `model_id` (Supabase has `battery_model` ตอนนี้) |
+| `qty_sampled` | `qty_inspected` |
+| `machine_name` | `machine_code` (DIM_MACHINE + DIM_METRIC) |
+
+### InfluxDB validation guard ([`etl_influxdb_to_oracle.py`](db_module/pipeline/airflow/dags/etl_influxdb_to_oracle.py))
+
+```python
+EXPECTED_METRICS = {"temperature_c", "machine_state_num", "cycle_count",
+                    "vibration_g", "current_a", "voltage_v"}
+EXPECTED_MACHINES = {"M01", "M02", "M03"}
+# raises ValueError if Influx schema drifts (กัน silent FACT_SENSOR empty)
+```
 
 ---
 
-## License & Authorship
+## 7. Oracle DW Schema
 
-KMITL coursework project — Burased.B@gsbattery.co.th. Architecture advice + code
-ร่วมเขียนกับ Claude Code (GS-MAD framework)
+### Object inventory
+
+| Type | Count | Names |
+|---|---:|---|
+| Tables | 20 | 7 DIM + 5 FACT + 8 STG |
+| Sequences | 9 | 4 DIM + 5 FACT |
+| Procedures | 10 | 4 SP_SYNC + 6 SP_LOAD |
+| Functions | 1 | `FN_GET_SHIFT_ID(p_ts TIMESTAMP) RETURN NUMBER` |
+| Indexes | 27 | FK + time-range + composite |
+| Views | 0 | (replaced by FastAPI analytics endpoints — AI03 lacks CREATE VIEW privilege) |
+
+### DIM (7) — slowly changing master
+
+| Table | Key | Source | Rows |
+|---|---|---|---:|
+| `DIM_DATE` | smart key `YYYYMMDD` | seed (2024-2028) | 1827 |
+| `DIM_LINE` | `SEQ_DIM_LINE` | sync from Supabase production_line | 1 |
+| `DIM_SHIFT` | manual id (1=DAY, 2=NIGHT) | seed inline | 2 |
+| `DIM_BATTERY_MODEL` | `SEQ_DIM_BATTERY_MODEL` | sync from Supabase battery_model | 3 |
+| `DIM_MACHINE` | `SEQ_DIM_MACHINE` | sync from Supabase machine | 3 |
+| `DIM_METRIC` | manual id (1-6) | seed inline | 6 |
+| `DIM_DEFECT_TYPE` | `SEQ_DIM_DEFECT_TYPE` | seed inline (recursive 5+15) | 20 |
+
+### FACT (5) — measurable events
+
+| Table | Grain | Source | Rows (current) |
+|---|---|---|---:|
+| `FACT_PRODUCTION` | 1 batch | STG_PRODUCTION_BATCH | 373 |
+| `FACT_QUALITY` | 1 QC inspection | STG_QC_RECORD JOIN STG_PRODUCTION_BATCH | 373 |
+| `FACT_DEFECT` | 1 defect type per QC (M:N) | STG_QC_DEFECT JOIN STG_QC_RECORD JOIN STG_PRODUCTION_BATCH | 29 |
+| `FACT_DOWNTIME` | 1 closed downtime event | STG_DOWNTIME_EVENT | 26 |
+| `FACT_SENSOR` | 1 (machine × metric × 15-min window) | STG_SENSOR_AGG (Influx Flux agg) | 6152 |
+
+### STG (8) — buffer (truncate-and-load)
+
+| OLTP staging (5) | DIM source staging (3) |
+|---|---|
+| STG_PRODUCTION_BATCH | STG_LINE |
+| STG_QC_RECORD | STG_BATTERY_MODEL |
+| STG_QC_DEFECT | STG_MACHINE |
+| STG_DOWNTIME_EVENT | |
+| STG_SENSOR_AGG | |
+
+### Key SP signatures
+
+```sql
+SP_SYNC_DIM_LINE             -- MERGE STG_LINE → DIM_LINE
+SP_SYNC_DIM_BATTERY_MODEL
+SP_SYNC_DIM_MACHINE
+SP_SYNC_ALL_DIMS             -- master: LINE → MODEL → MACHINE
+
+SP_LOAD_FACT_PRODUCTION      -- DELETE-by-key + cursor FOR-LOOP INSERT
+SP_LOAD_FACT_QUALITY
+SP_LOAD_FACT_DEFECT          -- flag pattern แทน CONTINUE
+SP_LOAD_FACT_DOWNTIME
+SP_LOAD_FACT_SENSOR
+SP_LOAD_ALL_FACTS            -- master: PROD → QC → DEFECT → DOWNTIME → SENSOR
+
+FN_GET_SHIFT_ID(ts) RETURN NUMBER  -- DAY=1 (07:30-16:30), NIGHT=2 (else)
+```
+
+---
+
+## 8. Setup from Scratch
+
+### Prerequisites
+- Python 3.12+
+- Java 17 (for JDBC) — `brew install openjdk@17`
+- Docker (for Airflow)
+- KMITL Oracle access — credentials in `.env`
+- Supabase project + InfluxDB instance (or use the one defined in `.env`)
+
+### Step 1 — Python env
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m ensurepip                  # bootstrap pip if missing
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install prophet        # ~5-10 min, compiles cmdstanpy
+```
+
+### Step 2 — Oracle JDBC driver
+
+ดาวน์โหลด `ojdbc8.jar` (Oracle 19c+ จะ compatible ลง 10g):
+```bash
+mkdir -p db_module/db_conn/oracle/drivers
+# วาง ojdbc8.jar ที่ db_module/db_conn/oracle/drivers/
+```
+
+### Step 3 — `.env`
+
+```bash
+cp .env.example .env
+# แก้ค่าจริง: SUPABASE_*, INFLUX_*, ORACLE_*, ORACLE_API_TOKEN, JAVA_HOME
+```
+
+### Step 4 — Verify connectors
+
+```bash
+.venv/bin/python -m pytest test/test_connectors.py -v
+.venv/bin/python test/test_connection.py        # 3-layer Oracle probe
+```
+
+### Step 5 — Apply Supabase OLTP
+
+```bash
+.venv/bin/python db_module/db_sources/supabases_sql_query/apply_supabase.py
+# applies 01_schema → 02_triggers → 03_master_data → 04_mock_data
+```
+
+### Step 6 — Apply Oracle DW
+
+```bash
+for f in 01_schema_dim 02_schema_fact 03_schema_staging \
+         04_dim_seed 05_indexes 06_procedure_dim_sync \
+         07_procedure_fact_load; do
+    .venv/bin/python db_module/db_sources/oracle_sql_query/run_sql_file.py \
+        "db_module/db_sources/oracle_sql_query/query/${f}.sql"
+done
+
+.venv/bin/python db_module/db_sources/oracle_sql_query/verify_warehouse_schema.py
+# Expected: OK — all expected objects present
+```
+
+### Step 7 — Sync DIMs (one-shot)
+
+```bash
+.venv/bin/python db_module/db_sources/oracle_sql_query/sync_dimensions_from_supabase.py
+# Expected: DIM_LINE=1, DIM_BATTERY_MODEL=3, DIM_MACHINE=3
+```
+
+### Step 8 — Start services
+
+```bash
+# Terminal 1: FastAPI
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+
+# Terminal 2: Airflow
+docker compose -f db_module/pipeline/docker-compose.yml up -d
+
+# Terminal 3: Streamlit
+cd app/streamlit && ../../.venv/bin/streamlit run dashboard.py
+```
+
+### Step 9 — Trigger ETL DAGs
+
+ใน Airflow UI <http://localhost:8088> → unpause + trigger ทั้ง 4 DAGs ตามลำดับ:
+1. `sync_dim_supabase` (รอ 30s)
+2. `etl_supabase_to_oracle` + `etl_influxdb_to_oracle` (parallel, รอ 2 นาที)
+3. `sp_load_dw` (รอ 1 นาที)
+
+### Step 10 — Open dashboard
+
+<http://localhost:8501/>
+
+---
+
+## 9. Daily Operations
+
+### Routine
+
+| Frequency | Task | How |
+|---|---|---|
+| Every 15 min | ETL ทำงานอัตโนมัติ | Airflow scheduler |
+| Every 15 min (5 min after) | FACT load | sp_load_dw scheduled |
+| Nightly 02:00 | DIM sync | sync_dim_supabase scheduled |
+| Manual | Refresh dashboard | คลิก Refresh button ที่ filter row ของแต่ละ page |
+| Manual | Train Prophet model | Page 2 → เลือก machine + metric → คลิก "Train model" |
+
+### Manual ETL trigger (เมื่อต้องการ run นอก schedule)
+
+```bash
+COMPOSE=db_module/pipeline/docker-compose.yml
+docker compose -f $COMPOSE exec -T airflow-scheduler \
+    airflow dags trigger <dag_id>
+```
+
+---
+
+## 10. Smoke Tests
+
+### Health checks
+
+```bash
+TOKEN=$(grep ^ORACLE_API_TOKEN= .env | cut -d= -f2)
+BASE=http://localhost:8000
+
+# 1. FastAPI + Oracle
+curl -s "$BASE/health" -H "Authorization: Bearer $TOKEN" | jq '{status, oracle_user}'
+
+# 2. Streamlit
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8501/
+
+# 3. Airflow scheduler
+docker compose -f db_module/pipeline/docker-compose.yml ps airflow-scheduler
+```
+
+### Endpoint smoke
+
+```bash
+TOKEN=$(grep ^ORACLE_API_TOKEN= .env | cut -d= -f2)
+BASE=http://localhost:8000
+DATE=2026-04-25
+
+for ep_args in \
+    "/api/sensor/available-metrics" \
+    "/api/sensor/by-machine-15min?date=$DATE&metric=temperature_c" \
+    "/api/scheduling/batch-timeline?order_id=1" \
+    "/api/analytics/oee-daily?period=Last+7+days" \
+    "/api/analytics/defect-pareto?period=Last+7+days" \
+    "/api/analytics/schedule-adherence?period=Last+7+days" \
+    "/api/analytics/batch-features"; do
+    n=$(curl -s "$BASE${ep_args}" -H "Authorization: Bearer $TOKEN" | jq '(.rows // []) | length')
+    echo "  $ep_args -> $n rows"
+done
+```
+
+### Data consistency
+
+```bash
+# Supabase ↔ Oracle FACT counts ต้อง match
+.venv/bin/python -c "
+from db_module.db_conn import SupabaseConnector
+with SupabaseConnector().cursor() as cur:
+    for sql in ['SELECT COUNT(*) FROM production_batch WHERE end_time IS NOT NULL',
+                'SELECT COUNT(*) FROM qc_record',
+                'SELECT COUNT(*) FROM qc_defect',
+                'SELECT COUNT(*) FROM downtime_event WHERE end_ts IS NOT NULL']:
+        cur.execute(sql); print(cur.fetchone()[0])
+"
+# Compare to: FACT_PRODUCTION / FACT_QUALITY / FACT_DEFECT / FACT_DOWNTIME counts
+```
+
+---
+
+## 11. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ConfigError: missing env ORACLE_HOST` | `.env` ไม่ได้โหลด หรือ key ไม่มี | check `.env` exists + has all required vars |
+| `Unable to locate a Java Runtime` | JAVA_HOME ไม่ตั้ง | `export JAVA_HOME=/opt/homebrew/opt/openjdk@17` หรือใส่ใน `.env` |
+| `ORA-01861: literal does not match format string` | passing Python date string ตรง ๆ | ใช้ `prepare_row()` ใน operational.py — แปลงเป็น java.sql.Date |
+| `ORA-00911: invalid character` ตอน apply view | `_PLSQL_BLOCK_STARTS` มี match `CREATE OR REPLACE` แบบหลวม | already fixed (specific to PROCEDURE/FUNCTION/TRIGGER/PACKAGE) |
+| `PLS-00201: identifier 'CONTINUE' must be declared` | Oracle 10g ไม่มี CONTINUE | ใช้ flag pattern (`v_skip BOOLEAN`) |
+| `ORA-01031: insufficient privileges` ตอน CREATE VIEW | AI03 ไม่มี CREATE VIEW privilege | views replaced by FastAPI `/api/analytics/*` endpoints |
+| `DIM_DATE.full_date = SYSDATE for all rows` | `current_date` variable name ชนกับ Oracle CURRENT_DATE function | renamed to `v_curr_date` |
+| Streamlit `pd.to_datetime` ValueError | mixed format (some rows have `.fff` microseconds) | ใช้ `format="mixed"` |
+| Streamlit Plotly add_vline TypeError | `0 + datetime` ใน annotation positioning | split `add_vline` + `add_annotation` แยก call |
+| FastAPI cold start ช้า 2-3s | JVM start + ojdbc8 load | normal — singleton หลัง first request |
+| FACT empty หลัง trigger DAG | DAG window ไม่ตรง mock data range | manual full ETL: หรือ backfill window ที่มี data |
+
+---
+
+## 12. Constraints & Design Decisions
+
+### Oracle Server (10.2.0.3)
+
+| Constraint | Workaround |
+|---|---|
+| ไม่รองรับ `CONTINUE` PL/SQL keyword | flag pattern: `v_skip BOOLEAN`, `IF NOT v_skip THEN ... END IF` |
+| ไม่รองรับ `SEQ.NEXTVAL ใน INSERT...SELECT` | Cursor FOR-LOOP iterating STG → INSERT one by one |
+| Default NLS_CALENDAR = 'THAI BUDDHA' | ALTER SESSION 'GREGORIAN' on every connection |
+| python-oracledb thin requires 12c+ | JDBC thin via `jaydebeapi` + `ojdbc8.jar` + `jpype` |
+| AI03 lacks `CREATE VIEW` privilege | views replaced by FastAPI analytics endpoints |
+| Variable `current_date` ชนกับ built-in `CURRENT_DATE` ใน SQL context (MERGE INSERT VALUES) | rename to `v_curr_date` |
+
+### JDBC + JVM
+
+| Constraint | Detail |
+|---|---|
+| `thinLogonCapability=o3` | Required for Oracle 10g logon protocol |
+| `disableOob=true` | Prevent network out-of-band issues |
+| `user.language=en, user.country=US` | Prevent Buddhist year on wire |
+| JVM start ครั้งเดียวต่อ process | jpype constraint — classpath freeze; restart uvicorn เพื่อเปลี่ยน jar |
+
+### Schema Design
+
+- **Smart key for DIM_DATE** (`YYYYMMDD` integer) — natural JOIN, no surrogate
+- **MERGE BY src_id** in SP_SYNC_DIM_* — preserve surrogate keys across sync
+- **Truncate-and-load STG** — buffer last 15-min window only
+- **DELETE-by-key + INSERT** in SP_LOAD_FACT_* — idempotent (re-run ก็ไม่ duplicate)
+- **Denormalize line_name in DIM_MACHINE** — query join saver
+
+### App Architecture
+
+- **FastAPI HTTP wrapper** — avoid bundling Java in Airflow Docker image
+- **OracleConnector singleton** — single uvicorn process; query rate ~1 req/min ไม่ต้องการ pool
+- **Streamlit cache TTL 5 min** — DAG cadence 15 min; refresh button clears cache instantly
+- **Prophet daemon thread training** — UI ไม่ block; status badge แสดง progress
+- **Pages auto-refresh 15 min** (via `streamlit_autorefresh`) — ตรง DAG cadence
+
+---
+
+## License + Credits
+
+KMITL Computer Science — IIoT Data Architecture project (2026)

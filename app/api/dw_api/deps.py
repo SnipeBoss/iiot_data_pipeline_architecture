@@ -1,16 +1,15 @@
 from __future__ import annotations
-
 import datetime as dt
 import re
+import jpype  
 from typing import Any
-
 from fastapi import Header, HTTPException, status
-
 from db_module.db_conn import OracleConnector
 from db_module.db_conn._env import get as env_get
 
 
-"""Shared FastAPI dependencies + low-level JDBC helpers
+"""
+Shared FastAPI dependencies + low-level JDBC helpers
 
 ประกอบด้วย 4 หน้าที่:
 1. Auth — `require_token` ตรวจ bearer token
@@ -29,10 +28,15 @@ Routes import จากที่นี่แทนที่จะเขียน
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
-    """Bearer token gate — skip ถ้า ORACLE_API_TOKEN ไม่ได้ตั้ง (dev mode)"""
+    """
+    Bearer token gate
+    """
+
+    # Get Oracle API Token 
     expected = env_get("ORACLE_API_TOKEN")
     if not expected:
         return
+    
     if authorization != f"Bearer {expected}":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -40,29 +44,28 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
         )
 
 
-# =============================================================================
-# Connection management (singleton)
-# =============================================================================
-
 
 _connector: OracleConnector | None = None
 
 
 def get_connector() -> OracleConnector:
-    """OracleConnector singleton — lazy init ครั้งแรกที่เรียก"""
+    """
+    Connection management (singleton)
+    OracleConnector singleton — lazy init ครั้งแรกที่เรียก
+    """
     global _connector
     if _connector is None:
         _connector = OracleConnector()
     return _connector
 
 
-# =============================================================================
-# JDBC type coercion (response: JDBC → JSON-safe)
-# =============================================================================
 
 
 def coerce(v: Any) -> Any:
-    """แปลงค่าจาก JDBC/Oracle ให้ JSON-serializable"""
+    """
+    JDBC type coercion (response: JDBC → JSON-safe)
+    แปลงค่าจาก JDBC/Oracle ให้ JSON-serializable
+    """
     if v is None:
         return None
     if isinstance(v, (dt.date, dt.datetime, dt.time)):
@@ -75,31 +78,30 @@ def coerce(v: Any) -> Any:
     return str(v)
 
 
-# =============================================================================
+
 # JDBC type coercion (request: ISO string → java.sql.*)
-# =============================================================================
-
-
 _ISO_DATE = r"^\d{4}-\d{2}-\d{2}$"
 _ISO_DATETIME = r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}"
-
 _JDATE = None
 _JTIMESTAMP = None
 
 
 def _jdbc_types():
-    """Lazy-resolve java.sql.Date / Timestamp หลังจาก JVM พร้อม"""
+    """
+    Lazy-resolve java.sql.Date / Timestamp หลังจาก JVM พร้อม
+    """
     global _JDATE, _JTIMESTAMP
     if _JDATE is None:
-        import jpype  # type: ignore[import-untyped]
-
         _JDATE = jpype.JClass("java.sql.Date")
         _JTIMESTAMP = jpype.JClass("java.sql.Timestamp")
+
     return _JDATE, _JTIMESTAMP
 
 
+
 def parse_iso(v: Any) -> Any:
-    """แปลง ISO date/datetime string → java.sql.Date/Timestamp ให้ JDBC bind ได้
+    """
+    แปลง ISO date/datetime string → java.sql.Date/Timestamp ให้ JDBC bind ได้
 
     ทำไมต้องแปลง:
     - Python `datetime.date` โดน JDBC overload resolver reject
@@ -107,14 +109,19 @@ def parse_iso(v: Any) -> Any:
       refuse กับ DATE/TIMESTAMP column (ORA-01861)
     → สร้าง java.sql.Date/Timestamp object ผ่าน jpype แทน
     """
+    
+    # Check ISO Format
     if not isinstance(v, str):
         return v
+    
+    # Check ISO Datetime
     if re.match(_ISO_DATETIME, v):
         _, JTimestamp = _jdbc_types()
         try:
             return JTimestamp.valueOf(v.replace("T", " ").rstrip("Z"))
         except Exception:
             return v
+    
     if re.match(_ISO_DATE, v):
         JDate, _ = _jdbc_types()
         try:
@@ -124,8 +131,11 @@ def parse_iso(v: Any) -> Any:
     return v
 
 
+
 def prepare_row(row: list[Any]) -> list[Any]:
-    """แปลงทุก element ใน row ให้พร้อม bind กับ JDBC"""
+    """
+    แปลงทุก element ใน row ให้พร้อม bind กับ JDBC
+    """
     return [parse_iso(v) for v in row]
 
 
@@ -135,9 +145,15 @@ def prepare_row(row: list[Any]) -> list[Any]:
 
 
 def query_rows(sql: str, params: list[Any] | None = None) -> list[dict]:
-    """รัน SELECT → list[dict] (column name lower-cased เพื่อ JSON friendly)"""
+    """
+    รัน SELECT → list[dict] (column name lower-cased เพื่อ JSON friendly)
+    """
+
+    # Set Connector
     connector = get_connector()
     conn = connector.connect()
+
+    
     try:
         cur = conn.cursor()
         try:

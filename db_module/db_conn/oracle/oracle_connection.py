@@ -1,22 +1,13 @@
-"""ตัวเชื่อมต่อ Oracle 10g ผ่าน JDBC (JayDeBeApi + ojdbc8.jar)
-
-ทำไมต้องใช้ JDBC ไม่ใช้ python-oracledb:
-Server ของ KMITL รัน Oracle 10.2.0.3 ซึ่งเก่ากว่าที่ python-oracledb thin-mode
-รองรับ (ต้อง >= 12c) และไม่มี Instant Client สำหรับ ARM64 (Apple Silicon)
-JDBC thin driver พร้อม flag `o3` logon capability เป็นทางเดียวที่ใช้ได้
-
-ข้อจำกัด JVM: jpype เริ่ม JVM ได้ครั้งเดียวต่อ process ดังนั้น `_ensure_jvm`
-จึงไม่ทำอะไรถ้า JVM ถูกเริ่มแล้ว และ classpath จะถูก freeze ตั้งแต่ครั้งแรก
-ถ้าเปลี่ยนค่า `ORACLE_JDBC_JAR` ต้อง restart Python ใหม่
-"""
-
 from __future__ import annotations
-
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
-
+import jaydebeapi
+import jpype
 from .._env import ConfigError, get, require, resolve_path
+
+
 
 # JVM arguments สำหรับ jpype
 # - thinLogonCapability=o3: บังคับให้ driver รองรับ Oracle 10g (รุ่นที่ KMITL ใช้)
@@ -42,8 +33,25 @@ _SESSION_NLS_STATEMENTS = (
 )
 
 
+
+
+
 class OracleConnector:
-    """Wrapper สำหรับเปิด connection Oracle 10g ผ่าน JDBC
+    """
+    
+    Wrapper สำหรับเปิด connection Oracle 10g ผ่าน JDBC
+    
+    ตัวเชื่อมต่อ Oracle 10g ผ่าน JDBC (JayDeBeApi + ojdbc8.jar)
+
+    ทำไมต้องใช้ JDBC ไม่ใช้ python-oracledb:
+    Server ของ KMITL รัน Oracle 10.2.0.3 ซึ่งเก่ากว่าที่ python-oracledb thin-mode
+    รองรับ (ต้อง >= 12c) และไม่มี Instant Client สำหรับ ARM64 (Apple Silicon)
+    JDBC thin driver พร้อม flag `o3` logon capability เป็นทางเดียวที่ใช้ได้
+
+    ข้อจำกัด JVM: jpype เริ่ม JVM ได้ครั้งเดียวต่อ process ดังนั้น `_ensure_jvm`
+    จึงไม่ทำอะไรถ้า JVM ถูกเริ่มแล้ว และ classpath จะถูก freeze ตั้งแต่ครั้งแรก
+    ถ้าเปลี่ยนค่า `ORACLE_JDBC_JAR` ต้อง restart Python ใหม่
+
 
     ใช้งาน:
         connector = OracleConnector()             # อ่านจาก .env
@@ -66,6 +74,8 @@ class OracleConnector:
         password: str | None = None,
         jdbc_jar: str | Path | None = None,
     ) -> None:
+        
+
         # ถ้าไม่ได้ส่ง argument เข้ามา จะ fallback ไปอ่านจาก env variable
         # ค่าที่ `require` = ต้องมีเสมอ; ถ้าขาดจะ raise ConfigError
         self.host = host or require("ORACLE_HOST")
@@ -74,6 +84,7 @@ class OracleConnector:
         self.user = user or require("ORACLE_USER")
         self.password = password or require("ORACLE_PASSWORD")
 
+
         # path ของ ojdbc8.jar สามารถส่งเป็น relative ได้
         # จะถูกแปลงเป็น absolute โดยยึด repo root
         jar = jdbc_jar or require("ORACLE_JDBC_JAR")
@@ -81,10 +92,17 @@ class OracleConnector:
         if not self.jdbc_jar.exists():
             raise ConfigError(f"JDBC driver not found at {self.jdbc_jar}")
 
+
+
+
     @property
     def jdbc_url(self) -> str:
-        """สร้าง JDBC URL ตาม format ของ Oracle thin driver"""
+        """
+        สร้าง JDBC URL ตาม format ของ Oracle thin driver
+        """
         return f"jdbc:oracle:thin:@//{self.host}:{self.port}/{self.service}"
+
+
 
     @classmethod
     def _ensure_jvm(cls, jdbc_jar: Path) -> None:
@@ -93,19 +111,19 @@ class OracleConnector:
         ถ้า JVM ถูกเริ่มไปแล้ว (เช่น จากการ connect() ก่อนหน้า) จะไม่ทำอะไร
         classpath ที่ส่งเข้าไปจะ freeze — เปลี่ยนแล้วต้อง restart Python
         """
-        import jpype
 
         if jpype.isJVMStarted():
             return
 
         # ถ้า user ตั้ง JAVA_HOME ไว้ใน .env ให้ propagate ไปที่ os.environ
         # เพื่อให้ jpype หา libjvm.so/.dylib/.dll ได้ถูกต้อง
-        import os
         java_home = get("JAVA_HOME")
         if java_home:
             os.environ.setdefault("JAVA_HOME", java_home)
 
         jpype.startJVM(*_JVM_ARGS, classpath=[str(jdbc_jar)])
+
+
 
     def connect(self):
         """เปิด connection ใหม่ พร้อมตั้ง NLS settings ให้เป็น Gregorian+English
@@ -133,6 +151,9 @@ class OracleConnector:
         finally:
             setup_cur.close()
         return conn
+
+
+
 
     @contextmanager
     def cursor(self) -> Iterator:

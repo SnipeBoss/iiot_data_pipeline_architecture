@@ -84,8 +84,3 @@ def bulk_insert(
 def call_sp(name: str, args: list[Any] | None = None) -> dict:
     body = {"name": name, "args": [as_iso(v) for v in (args or [])]}
     return _post("/sp/call", body)
-
-
-def run_query(sql: str, params: list[Any] | None = None) -> dict:
-    body = {"sql": sql, "params": [as_iso(v) for v in (params or [])]}
-    return _post("/sql/query", body)

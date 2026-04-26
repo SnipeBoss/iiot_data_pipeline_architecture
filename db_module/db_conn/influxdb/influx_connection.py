@@ -8,7 +8,8 @@ from influxdb_client import InfluxDBClient
 
 
 class InfluxConnector:
-    """Wrapper เปิด client InfluxDB 2.x
+    """
+    Wrapper เปิด client InfluxDB 2.x
 
     ใช้งาน:
         influx = InfluxConnector()
@@ -42,6 +43,7 @@ class InfluxConnector:
 
         try:
             yield c
+            
         finally:
             c.close()
 

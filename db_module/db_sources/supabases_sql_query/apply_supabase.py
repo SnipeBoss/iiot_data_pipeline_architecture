@@ -9,9 +9,10 @@
     python db_module/db_sources/supabases_sql_query/apply_supabase.py
 
 ลำดับ default:
-    query/01_schema.sql       — สร้างตาราง + index
-    query/02_master_data.sql  — insert master data (line/machine/product...)
-    mock/03_mock_data.sql     — insert mock OLTP data 30 วัน
+    query/01_schema.sql              — สร้างตาราง 12 ตัว + index
+    query/02_trigger_functions.sql   — sync batch status + compute downtime duration
+    query/03_master_data.sql         — insert master (line/machine/battery_model/lookups/defects)
+    mock/04_mock_data.sql            — insert mock OLTP data ตาม InfluxDB time range
 
 Override ได้โดยส่ง path ผ่าน argv — จะรันตามลำดับที่ระบุ
 """
@@ -31,14 +32,25 @@ from db_module.db_conn import SupabaseConnector  # noqa: E402
 HERE = Path(__file__).parent
 DEFAULT_FILES = [
     HERE / "query" / "01_schema.sql",
-    HERE / "query" / "02_master_data.sql",
-    HERE / "mock" / "03_mock_data.sql",
+    HERE / "query" / "02_trigger_functions.sql",
+    HERE / "query" / "03_master_data.sql",
+    HERE / "mock"  / "04_mock_data.sql",
 ]
 
-# ตารางที่ต้อง audit count หลัง apply เสร็จ (ตาม schema ใหม่ 6 ตาราง)
+# ตารางที่ต้อง audit count หลัง apply เสร็จ (ตาม schema ใหม่ 12 ตาราง)
 _AUDIT_TABLES = (
-    "production_line", "machine", "product",
-    "production_order", "production_batch", "qc_record",
+    "production_line",
+    "machine",
+    "battery_model",
+    "batch_status",
+    "event_reason",
+    "defect_type",
+    "production_order",
+    "production_batch",
+    "batch_status_event",
+    "qc_record",
+    "qc_defect",
+    "downtime_event",
 )
 
 
