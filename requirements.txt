@@ -1,31 +1,58 @@
-# --- Oracle (JDBC via JayDeBeApi — python-oracledb cannot reach 10g) ---
+# =============================================================================
+# Unified IIoT Data Architecture — Python dependencies
+# Python 3.12+
+# =============================================================================
+
+# --- Database connectors -----------------------------------------------------
+# Oracle 10g via JDBC (python-oracledb thin requires 12c+; ARM64 has no Instant Client)
 JayDeBeApi>=1.2.3
 JPype1>=1.5.0
 
-# --- Supabase / Postgres ---
+# Supabase / PostgreSQL (production_batch, qc_record, downtime_event, ...)
 psycopg2-binary>=2.9.9
 
-# --- InfluxDB 2.x ---
+# InfluxDB 2.x — sensor 1Hz data
 influxdb-client>=1.40.0
 
-# --- ETL + transforms ---
-pandas>=2.2.0
 
-# --- Serving layer ---
+# --- ETL + transforms --------------------------------------------------------
+pandas>=2.2.0
+numpy>=1.26.0
+
+
+# --- Serving layer (FastAPI on host:8000) ------------------------------------
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
+pydantic>=2.5.0
+
+
+# --- Streamlit dashboard (host:8501) -----------------------------------------
 streamlit>=1.33.0
 streamlit-autorefresh>=1.0.1
 plotly>=5.17.0
 requests>=2.31.0
 
-# --- ML pipeline (Phase D) ---
-lightgbm>=4.0.0
-joblib>=1.3.0
-scikit-learn>=1.4.0
 
-# --- Utilities ---
+# --- Time-series forecasting (Page 2) ----------------------------------------
+# Prophet pulls cmdstanpy → compiles Stan model on first install (~5-10 min)
+# If pip not in venv: .venv/bin/python -m ensurepip ก่อน, then pip install prophet
+prophet>=1.1.5
+
+
+# --- Utilities ---------------------------------------------------------------
 python-dotenv>=1.0.0
 
-# --- Tests ---
+
+# --- Dev / testing -----------------------------------------------------------
 pytest>=8.0.0
+
+
+# =============================================================================
+# NOT installed via pip (managed elsewhere):
+#
+#   - apache-airflow 2.8         → installed inside Airflow Docker container
+#                                   (db_module/pipeline/docker-compose.yml)
+#   - ojdbc8.jar                 → manual download to
+#                                   db_module/db_conn/oracle/drivers/ojdbc8.jar
+#   - openjdk@17 + JAVA_HOME     → host system (`brew install openjdk@17`)
+# =============================================================================

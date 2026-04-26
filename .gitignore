@@ -29,3 +29,15 @@ db_module/pipeline/airflow/plugins/__pycache__/
 
 # embedded unrelated projects
 gs-mad/
+
+# Claude Code workspace
+.claude/
+
+# Tests (manual smoke tests, not CI-wired)
+test/
+
+# Streamlit Prophet model cache
+app/streamlit/cache/
+
+# Compiled SQL/markdown artifacts
+markdown/dw_schema_compact.sql
