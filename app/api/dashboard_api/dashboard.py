@@ -1,25 +1,25 @@
 from __future__ import annotations
-
 from fastapi import APIRouter, Depends
-
 from app.api.dw_api.deps import query_rows, require_token
 
 
-"""Dashboard endpoints — อ่าน DW facts สำหรับ Streamlit UI
+"""
+Dashboard endpoints — อ่าน DW facts สำหรับ Streamlit UI
 
-Endpoints ที่ใช้จริง 7 ตัว (3 sub-domain):
-- /api/sensor/*    — sensor metrics + 15-min telemetry (Page 2)
-- /api/scheduling/batch-timeline — Gantt drilldown (Page 3)
-- /api/analytics/* — replace Oracle views (Page 1, 2, 3 + ML)
+    Endpoints ที่ใช้จริง 7 ตัว (3 sub-domain):
+    - /api/sensor/*    — sensor metrics + 15-min telemetry (Page 2)
+    - /api/scheduling/batch-timeline — Gantt drilldown (Page 3)
+    - /api/analytics/* — replace Oracle views (Page 1, 2, 3 + ML)
 
-Analytics endpoints ทำหน้าที่แทน Oracle views ที่ AI03 ไม่มี privilege สร้าง:
-- /api/analytics/oee-daily          ← V_OEE_DAILY equivalent
-- /api/analytics/defect-pareto      ← V_DEFECT_PARETO equivalent
-- /api/analytics/schedule-adherence ← V_SCHEDULE_ADHERENCE equivalent
-- /api/analytics/batch-features     ← V_BATCH_FEATURES equivalent (ML feature matrix)
+    Analytics endpoints ทำหน้าที่แทน Oracle views ที่ AI03 ไม่มี privilege สร้าง:
+    - /api/analytics/oee-daily          ← V_OEE_DAILY equivalent
+    - /api/analytics/defect-pareto      ← V_DEFECT_PARETO equivalent
+    - /api/analytics/schedule-adherence ← V_SCHEDULE_ADHERENCE equivalent
+    - /api/analytics/batch-features     ← V_BATCH_FEATURES equivalent (ML feature matrix)
 """
 
 
+# Set Router
 router = APIRouter(
     prefix="/api",
     dependencies=[Depends(require_token)],
@@ -34,37 +34,37 @@ router = APIRouter(
 
 _SQL_SENSOR_METRICS = """
     SELECT metric_id, metric_name, unit, machine_code, description
-      FROM DIM_METRIC ORDER BY metric_id
+    FROM DIM_METRIC ORDER BY metric_id
 """
 
 
 _SQL_SENSOR_BY_MACHINE_15MIN = """
-    SELECT dm.machine_code,
-           fs.window_start,
-           fs.window_end,
-           fs.avg_value,
-           fs.min_value,
-           fs.max_value
-      FROM FACT_SENSOR fs
-      JOIN DIM_MACHINE dm  ON fs.machine_id = dm.machine_id
-      JOIN DIM_METRIC  dmt ON fs.metric_id  = dmt.metric_id
-      JOIN DIM_DATE    d   ON fs.date_id    = d.date_id
-     WHERE d.full_date = ?
-       AND dmt.metric_name = ?
-     ORDER BY fs.window_start, dm.machine_code
+    SELECT machine.machine_code,
+           sensor.window_start,
+           sensor.window_end,
+           sensor.avg_value,
+           sensor.min_value,
+           sensor.max_value
+      FROM FACT_SENSOR  sensor
+      JOIN DIM_MACHINE  machine  ON sensor.machine_id = machine.machine_id
+      JOIN DIM_METRIC   metric   ON sensor.metric_id  = metric.metric_id
+      JOIN DIM_DATE     date_dim ON sensor.date_id    = date_dim.date_id
+     WHERE date_dim.full_date  = ?
+       AND metric.metric_name  = ?
+     ORDER BY sensor.window_start, machine.machine_code
 """
 
 
 _SQL_BATCH_TIMELINE = """
-    SELECT p.batch_src_id,
-           p.batch_planned_start,
-           p.batch_planned_end,
-           p.start_time   AS actual_start,
-           p.end_time     AS actual_end,
-           p.slippage_min
-      FROM FACT_PRODUCTION p
-     WHERE p.order_src_id = ?
-     ORDER BY p.batch_planned_start
+    SELECT production.batch_src_id,
+           production.batch_planned_start,
+           production.batch_planned_end,
+           production.start_time AS actual_start,
+           production.end_time   AS actual_end,
+           production.slippage_min
+      FROM FACT_PRODUCTION production
+     WHERE production.order_src_id = ?
+     ORDER BY production.batch_planned_start
 """
 
 
@@ -75,109 +75,131 @@ _SQL_BATCH_TIMELINE = """
 #   Q = qty_passed / qty_inspected
 _SQL_V_OEE_DAILY = """
     WITH
-    production AS (
-        SELECT p.date_id, p.line_id, p.shift_id,
-               SUM(p.qty_out)                AS total_qty_out,
-               SUM(p.qty_planned)            AS total_qty_planned,
-               SUM(p.duration_min)           AS total_run_min,
-               SUM(p.batch_est_duration_min) AS total_planned_min
-          FROM FACT_PRODUCTION p
-         WHERE p.date_id >= ?
-         GROUP BY p.date_id, p.line_id, p.shift_id
+    production_agg AS (
+        SELECT FACT_PRODUCTION.date_id,
+               FACT_PRODUCTION.line_id,
+               FACT_PRODUCTION.shift_id,
+               SUM(FACT_PRODUCTION.qty_out)                AS total_qty_out,
+               SUM(FACT_PRODUCTION.qty_planned)            AS total_qty_planned,
+               SUM(FACT_PRODUCTION.duration_min)           AS total_run_min,
+               SUM(FACT_PRODUCTION.batch_est_duration_min) AS total_planned_min
+          FROM FACT_PRODUCTION
+         WHERE FACT_PRODUCTION.date_id >= ?
+         GROUP BY FACT_PRODUCTION.date_id,
+                  FACT_PRODUCTION.line_id,
+                  FACT_PRODUCTION.shift_id
     ),
-    quality AS (
-        SELECT q.date_id, q.line_id, q.shift_id,
-               SUM(q.qty_inspected) AS total_inspected,
-               SUM(q.qty_passed)    AS total_passed
-          FROM FACT_QUALITY q
-         WHERE q.date_id >= ?
-         GROUP BY q.date_id, q.line_id, q.shift_id
+    quality_agg AS (
+        SELECT FACT_QUALITY.date_id,
+               FACT_QUALITY.line_id,
+               FACT_QUALITY.shift_id,
+               SUM(FACT_QUALITY.qty_inspected) AS total_inspected,
+               SUM(FACT_QUALITY.qty_passed)    AS total_passed
+          FROM FACT_QUALITY
+         WHERE FACT_QUALITY.date_id >= ?
+         GROUP BY FACT_QUALITY.date_id,
+                  FACT_QUALITY.line_id,
+                  FACT_QUALITY.shift_id
     ),
-    downtime AS (
-        SELECT d.date_id, d.line_id, d.shift_id,
-               SUM(d.duration_min) AS total_down_min
-          FROM FACT_DOWNTIME d
-         WHERE d.is_planned = 'N'
-           AND d.date_id >= ?
-         GROUP BY d.date_id, d.line_id, d.shift_id
+    downtime_agg AS (
+        SELECT FACT_DOWNTIME.date_id,
+               FACT_DOWNTIME.line_id,
+               FACT_DOWNTIME.shift_id,
+               SUM(FACT_DOWNTIME.duration_min) AS total_down_min
+          FROM FACT_DOWNTIME
+         WHERE FACT_DOWNTIME.is_planned = 'N'
+           AND FACT_DOWNTIME.date_id   >= ?
+         GROUP BY FACT_DOWNTIME.date_id,
+                  FACT_DOWNTIME.line_id,
+                  FACT_DOWNTIME.shift_id
     )
-    SELECT p.date_id, p.line_id, p.shift_id,
-           CASE WHEN p.total_planned_min > 0 THEN
-                (p.total_planned_min - NVL(d.total_down_min, 0)) / p.total_planned_min
+    SELECT production_agg.date_id,
+           production_agg.line_id,
+           production_agg.shift_id,
+           CASE WHEN production_agg.total_planned_min > 0 THEN
+                (production_agg.total_planned_min - NVL(downtime_agg.total_down_min, 0))
+                / production_agg.total_planned_min
                 ELSE 0 END AS availability,
-           CASE WHEN p.total_qty_planned > 0 THEN
-                p.total_qty_out / p.total_qty_planned
+           CASE WHEN production_agg.total_qty_planned > 0 THEN
+                production_agg.total_qty_out / production_agg.total_qty_planned
                 ELSE 0 END AS performance,
-           CASE WHEN q.total_inspected > 0 THEN
-                q.total_passed / q.total_inspected
+           CASE WHEN quality_agg.total_inspected > 0 THEN
+                quality_agg.total_passed / quality_agg.total_inspected
                 ELSE 0 END AS quality,
-           CASE WHEN p.total_planned_min > 0
-                 AND p.total_qty_planned > 0
-                 AND q.total_inspected > 0
-                THEN (p.total_planned_min - NVL(d.total_down_min, 0)) / p.total_planned_min
-                   * p.total_qty_out / p.total_qty_planned
-                   * q.total_passed / q.total_inspected
+           CASE WHEN production_agg.total_planned_min > 0
+                 AND production_agg.total_qty_planned > 0
+                 AND quality_agg.total_inspected      > 0
+                THEN (production_agg.total_planned_min - NVL(downtime_agg.total_down_min, 0))
+                       / production_agg.total_planned_min
+                   * production_agg.total_qty_out     / production_agg.total_qty_planned
+                   * quality_agg.total_passed         / quality_agg.total_inspected
                 ELSE 0 END AS oee,
-           p.total_qty_out, p.total_qty_planned,
-           NVL(d.total_down_min, 0) AS downtime_min,
-           q.total_inspected, q.total_passed
-      FROM production p
-      LEFT JOIN quality  q ON q.date_id = p.date_id
-                          AND q.line_id = p.line_id
-                          AND q.shift_id = p.shift_id
-      LEFT JOIN downtime d ON d.date_id = p.date_id
-                          AND d.line_id = p.line_id
-                          AND d.shift_id = p.shift_id
-     ORDER BY p.date_id, p.line_id, p.shift_id
+           production_agg.total_qty_out,
+           production_agg.total_qty_planned,
+           NVL(downtime_agg.total_down_min, 0) AS downtime_min,
+           quality_agg.total_inspected,
+           quality_agg.total_passed
+      FROM production_agg
+      LEFT JOIN quality_agg  ON quality_agg.date_id  = production_agg.date_id
+                            AND quality_agg.line_id  = production_agg.line_id
+                            AND quality_agg.shift_id = production_agg.shift_id
+      LEFT JOIN downtime_agg ON downtime_agg.date_id  = production_agg.date_id
+                            AND downtime_agg.line_id  = production_agg.line_id
+                            AND downtime_agg.shift_id = production_agg.shift_id
+     ORDER BY production_agg.date_id,
+              production_agg.line_id,
+              production_agg.shift_id
 """
 
 
 # --- Replaces V_DEFECT_PARETO ---
 _SQL_V_DEFECT_PARETO = """
-    SELECT d.parent_code      AS category,
-           d.defect_code      AS defect_type,
-           d.severity,
-           COUNT(*)           AS occurrence_count,
-           SUM(f.qty_affected) AS total_qty_affected
-      FROM FACT_DEFECT      f
-      JOIN DIM_DEFECT_TYPE  d ON f.defect_id = d.defect_id
-     WHERE d.is_leaf = 'Y'
-       AND f.date_id >= ?
-     GROUP BY d.parent_code, d.defect_code, d.severity
+    SELECT defect_type.parent_code   AS category,
+           defect_type.defect_code   AS defect_type,
+           defect_type.severity,
+           COUNT(*)                  AS occurrence_count,
+           SUM(defect.qty_affected)  AS total_qty_affected
+      FROM FACT_DEFECT      defect
+      JOIN DIM_DEFECT_TYPE  defect_type ON defect.defect_id = defect_type.defect_id
+     WHERE defect_type.is_leaf  = 'Y'
+       AND defect.date_id      >= ?
+     GROUP BY defect_type.parent_code,
+              defect_type.defect_code,
+              defect_type.severity
      ORDER BY total_qty_affected DESC
 """
 
 
 # --- Replaces V_SCHEDULE_ADHERENCE ---
 _SQL_V_SCHEDULE_ADHERENCE = """
-    SELECT p.prod_id,
-           p.date_id,
-           p.batch_src_id,
-           p.order_src_id,
-           bm.model_code,
-           dl.line_name,
-           ds.shift_name,
-           p.qty_planned,
-           p.qty_out,
-           p.batch_planned_start,
-           p.batch_planned_end,
-           p.start_time AS actual_start,
-           p.end_time   AS actual_end,
-           p.batch_est_duration_min AS planned_min,
-           p.duration_min           AS actual_min,
-           p.slippage_min,
+    SELECT production.prod_id,
+           production.date_id,
+           production.batch_src_id,
+           production.order_src_id,
+           model.model_code,
+           prod_line.line_name,
+           prod_shift.shift_name,
+           production.qty_planned,
+           production.qty_out,
+           production.batch_planned_start,
+           production.batch_planned_end,
+           production.start_time            AS actual_start,
+           production.end_time              AS actual_end,
+           production.batch_est_duration_min AS planned_min,
+           production.duration_min          AS actual_min,
+           production.slippage_min,
            CASE
-               WHEN p.slippage_min <= 5  THEN 'ON_TIME'
-               WHEN p.slippage_min <= 15 THEN 'MINOR_LATE'
+               WHEN production.slippage_min <=  5 THEN 'ON_TIME'
+               WHEN production.slippage_min <= 15 THEN 'MINOR_LATE'
                ELSE 'LATE'
-           END AS adherence_status,
-           p.yield_rate
-      FROM FACT_PRODUCTION    p
-      JOIN DIM_BATTERY_MODEL  bm ON p.model_id = bm.model_id
-      JOIN DIM_LINE           dl ON p.line_id  = dl.line_id
-      JOIN DIM_SHIFT          ds ON p.shift_id = ds.shift_id
-     WHERE p.date_id >= ?
-     ORDER BY p.start_time
+           END                              AS adherence_status,
+           production.yield_rate
+      FROM FACT_PRODUCTION    production
+      JOIN DIM_BATTERY_MODEL  model      ON production.model_id = model.model_id
+      JOIN DIM_LINE           prod_line  ON production.line_id  = prod_line.line_id
+      JOIN DIM_SHIFT          prod_shift ON production.shift_id = prod_shift.shift_id
+     WHERE production.date_id >= ?
+     ORDER BY production.start_time
 """
 
 
@@ -186,46 +208,50 @@ _SQL_V_SCHEDULE_ADHERENCE = """
 # ใช้โดย LightGBM trainer (consume ผ่าน HTTP)
 _SQL_V_BATCH_FEATURES = """
     SELECT
-        p.prod_id,
-        p.batch_src_id,
-        p.order_src_id,
-        p.model_id,
-        p.line_id,
-        EXTRACT(HOUR FROM p.start_time) AS hour_of_day,
-        p.qty_planned,
-        p.duration_min,
-        p.batch_est_duration_min,
-        p.slippage_min,
-        p.slippage_min / NULLIF(p.batch_est_duration_min, 0) AS slippage_ratio,
-        AVG(CASE WHEN m.metric_name = 'temperature_c' THEN s.avg_value END) AS temp_avg,
-        MAX(CASE WHEN m.metric_name = 'temperature_c' THEN s.max_value END) AS temp_max,
-        STDDEV(CASE WHEN m.metric_name = 'temperature_c' THEN s.avg_value END) AS temp_std,
-        AVG(CASE WHEN m.metric_name = 'vibration_g' THEN s.avg_value END) AS vib_avg,
-        MAX(CASE WHEN m.metric_name = 'vibration_g' THEN s.max_value END) AS vib_max,
-        STDDEV(CASE WHEN m.metric_name = 'vibration_g' THEN s.avg_value END) AS vib_std,
-        AVG(CASE WHEN m.metric_name = 'cycle_count' THEN s.avg_value END) AS cycle_avg,
-        AVG(CASE WHEN m.metric_name = 'current_a' THEN s.avg_value END) AS current_avg,
-        MAX(CASE WHEN m.metric_name = 'current_a' THEN s.max_value END) AS current_max,
-        AVG(CASE WHEN m.metric_name = 'voltage_v' THEN s.avg_value END) AS voltage_avg,
-        MIN(CASE WHEN m.metric_name = 'voltage_v' THEN s.min_value END) AS voltage_min,
-        MAX(CASE WHEN m.metric_name = 'voltage_v' THEN s.max_value END) AS voltage_max,
-        q.defect_rate_pct,
-        q.qty_failed
-      FROM FACT_PRODUCTION p
-      JOIN FACT_QUALITY    q ON p.batch_src_id = q.batch_src_id
-      LEFT JOIN FACT_SENSOR s
-             ON s.window_start < p.end_time
-            AND s.window_end   > p.start_time
-      LEFT JOIN DIM_METRIC m ON s.metric_id = m.metric_id
-     WHERE q.defect_rate_pct IS NOT NULL
-     GROUP BY
-        p.prod_id, p.batch_src_id, p.order_src_id,
-        p.model_id, p.line_id,
-        EXTRACT(HOUR FROM p.start_time),
-        p.qty_planned, p.duration_min,
-        p.batch_est_duration_min, p.slippage_min,
-        q.defect_rate_pct, q.qty_failed
-     ORDER BY p.prod_id
+        production.prod_id,
+        production.batch_src_id,
+        production.order_src_id,
+        production.model_id,
+        production.line_id,
+        EXTRACT(HOUR FROM production.start_time) AS hour_of_day,
+        production.qty_planned,
+        production.duration_min,
+        production.batch_est_duration_min,
+        production.slippage_min,
+        production.slippage_min / NULLIF(production.batch_est_duration_min, 0) AS slippage_ratio,
+        AVG(CASE WHEN metric.metric_name = 'temperature_c' THEN sensor.avg_value END) AS temp_avg,
+        MAX(CASE WHEN metric.metric_name = 'temperature_c' THEN sensor.max_value END) AS temp_max,
+        STDDEV(CASE WHEN metric.metric_name = 'temperature_c' THEN sensor.avg_value END) AS temp_std,
+        AVG(CASE WHEN metric.metric_name = 'vibration_g'   THEN sensor.avg_value END) AS vib_avg,
+        MAX(CASE WHEN metric.metric_name = 'vibration_g'   THEN sensor.max_value END) AS vib_max,
+        STDDEV(CASE WHEN metric.metric_name = 'vibration_g' THEN sensor.avg_value END) AS vib_std,
+        AVG(CASE WHEN metric.metric_name = 'cycle_count'   THEN sensor.avg_value END) AS cycle_avg,
+        AVG(CASE WHEN metric.metric_name = 'current_a'     THEN sensor.avg_value END) AS current_avg,
+        MAX(CASE WHEN metric.metric_name = 'current_a'     THEN sensor.max_value END) AS current_max,
+        AVG(CASE WHEN metric.metric_name = 'voltage_v'     THEN sensor.avg_value END) AS voltage_avg,
+        MIN(CASE WHEN metric.metric_name = 'voltage_v'     THEN sensor.min_value END) AS voltage_min,
+        MAX(CASE WHEN metric.metric_name = 'voltage_v'     THEN sensor.max_value END) AS voltage_max,
+        quality.defect_rate_pct,
+        quality.qty_failed
+      FROM FACT_PRODUCTION    production
+      JOIN FACT_QUALITY       quality ON production.batch_src_id = quality.batch_src_id
+      LEFT JOIN FACT_SENSOR   sensor  ON sensor.window_start < production.end_time
+                                     AND sensor.window_end   > production.start_time
+      LEFT JOIN DIM_METRIC    metric  ON sensor.metric_id    = metric.metric_id
+     WHERE quality.defect_rate_pct IS NOT NULL
+     GROUP BY production.prod_id,
+              production.batch_src_id,
+              production.order_src_id,
+              production.model_id,
+              production.line_id,
+              EXTRACT(HOUR FROM production.start_time),
+              production.qty_planned,
+              production.duration_min,
+              production.batch_est_duration_min,
+              production.slippage_min,
+              quality.defect_rate_pct,
+              quality.qty_failed
+     ORDER BY production.prod_id
 """
 
 
@@ -312,6 +338,7 @@ def analytics_schedule_adherence(period: str = "Last 7 days") -> dict:
     start_id = _period_to_start_date_id(period)
     rows = query_rows(_SQL_V_SCHEDULE_ADHERENCE, [start_id])
     return {"period": period, "rows": rows}
+
 
 
 @router.get("/analytics/batch-features")

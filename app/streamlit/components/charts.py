@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -9,7 +8,8 @@ import plotly.graph_objects as go
 # ============================================================
 
 def oee_trend_chart(df: pd.DataFrame) -> go.Figure:
-    """OEE trend พร้อม sub-components (availability/performance/quality)
+    """
+    OEE trend พร้อม sub-components (availability/performance/quality)
 
     Expected columns: full_date, oee_pct, availability_pct, performance_pct, quality_pct
     """
@@ -35,8 +35,11 @@ def oee_trend_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+
+
 def defect_pareto_chart(df: pd.DataFrame) -> go.Figure:
-    """Pareto chart: bars เรียงจากมาก→น้อย + cumulative % line (top 10)
+    """
+    Pareto chart: bars เรียงจากมาก→น้อย + cumulative % line (top 10)
 
     Expected columns: defect_code (or defect_type), qty_affected, pct_of_total
     """
@@ -62,8 +65,11 @@ def defect_pareto_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+
+
 def defect_rate_by_model_chart(df: pd.DataFrame) -> go.Figure:
-    """Bar chart — defect rate per battery model
+    """
+    Bar chart — defect rate per battery model
 
     Expected columns: model_name, defect_rate_pct
     """
@@ -80,6 +86,10 @@ def defect_rate_by_model_chart(df: pd.DataFrame) -> go.Figure:
         margin=dict(t=20, b=40, l=40, r=20),
     )
     return fig
+
+
+
+
 
 
 # ============================================================
@@ -141,6 +151,12 @@ def forecast_chart(historical: pd.DataFrame, forecast: pd.DataFrame,
         margin=dict(t=20, b=40, l=40, r=20),
     )
     return fig
+
+
+
+
+
+
 
 
 # ============================================================

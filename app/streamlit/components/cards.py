@@ -39,6 +39,7 @@ def kpi_row(items: list[dict]) -> None:
             kpi_card(**item)
 
 
+
 def status_badge(text: str, status: str = "info") -> str:
     """Markdown badge (HTML) สำหรับใส่ใน st.markdown(... unsafe_allow_html=True)
 
