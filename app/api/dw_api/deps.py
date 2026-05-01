@@ -12,11 +12,15 @@ from db_module.db_conn._env import get as env_get
 Shared FastAPI dependencies + low-level JDBC helpers
 
 ประกอบด้วย 4 หน้าที่:
-1. Auth — `require_token` ตรวจ bearer token
-2. Connection — `get_connector()` singleton ของ OracleConnector
-3. JDBC coercion — แปลงค่า Python ↔ java.sql.* (ฝั่ง request)
-                    แปลงค่าจาก JDBC → JSON-safe (ฝั่ง response)
-4. Query helper — `query_rows()` shortcut สำหรับ SELECT → list[dict]
+
+    1. Auth — `require_token` ตรวจ bearer token
+
+    2. Connection — `get_connector()` singleton ของ OracleConnector
+
+    3. JDBC coercion — แปลงค่า Python ↔ java.sql.* (ฝั่ง request)
+                        แปลงค่าจาก JDBC → JSON-safe (ฝั่ง response)
+
+    4. Query helper — `query_rows()` shortcut สำหรับ SELECT → list[dict]
 
 Routes import จากที่นี่แทนที่จะเขียน logic ซ้ำในทุก handler
 """

@@ -46,15 +46,19 @@ _PLSQL_BLOCK_STARTS = (
 
 
 def split_statements(sql: str) -> list[str]:
-    """แยกไฟล์ DDL เป็น list ของคำสั่ง SQL/PL-SQL
+    """
+    แยกไฟล์ DDL เป็น list ของคำสั่ง SQL/PL-SQL
 
     กติกา:
     - บรรทัดที่มีแค่ `/` คือตัวจบของ PL/SQL block → ทุกอย่างตั้งแต่
       terminator ก่อนหน้ากลายเป็น statement เดียว
+
     - นอกบล็อก PL/SQL: statement จบที่ `;` ที่เป็น non-whitespace
       char ตัวสุดท้ายของบรรทัด
+
     - comment บรรทัดเดียว (`--`) นอกบล็อกจะถูกข้าม
     """
+
     lines = sql.splitlines()
     out: list[str] = []
     buf: list[str] = []
@@ -67,36 +71,48 @@ def split_statements(sql: str) -> list[str]:
         if stripped.startswith("--") and not in_block:
             continue
 
-        # ตรวจจับจุดเริ่ม PL/SQL block แบบ heuristic
-        # (case-insensitive เพราะ SQL keyword ไม่สนตัวพิมพ์)
+        # ตรวจจับจุดเริ่ม PL/SQL block แบบ heuristic 
         if not in_block and stripped.upper().startswith(_PLSQL_BLOCK_STARTS):
             in_block = True
 
+
         if in_block:
+
             # เจอ `/` บรรทัดเดียว = จบ PL/SQL block
             if stripped == "/":
+            
                 stmt = "\n".join(buf).strip()
                 if stmt:
                     out.append(stmt)
+            
                 buf = []
                 in_block = False
                 continue
+
             buf.append(raw)
             continue
 
+
         # SQL ธรรมดา: สะสมบรรทัดจนกว่าเจอ `;` ที่ท้ายบรรทัด
         buf.append(raw)
+
         if stripped.endswith(";"):
+        
             # ตัด `;` ท้ายออกเพราะ jaydebeapi/JDBC ไม่ต้องการ
             stmt = "\n".join(buf).strip().rstrip(";").strip()
+        
             if stmt:
                 out.append(stmt)
+        
             buf = []
+
 
     # เก็บ statement ท้ายไฟล์ที่ไม่ได้ลงท้ายด้วย `;` หรือ `/`
     tail = "\n".join(buf).strip()
+
     if tail:
         out.append(tail.rstrip(";").strip())
+
     return out
 
 
@@ -104,7 +120,8 @@ def split_statements(sql: str) -> list[str]:
 
 
 def apply(sql_path: Path) -> int:
-    """อ่าน SQL ไฟล์ทั้งไฟล์และรันทีละ statement บน Oracle
+    """
+    อ่าน SQL ไฟล์ทั้งไฟล์และรันทีละ statement บน Oracle
 
     คืน 0 ถ้าสำเร็จทั้งหมด, 1 ถ้ามี statement ไหน error
     """
@@ -130,6 +147,7 @@ def apply(sql_path: Path) -> int:
                 print(f"\nFAIL on statement {i}:\n{stmt}\n---\n{exc}")
                 conn.rollback()
                 return 1
+            
         conn.commit()
         print("\nOK — all statements applied and committed.")
         return 0

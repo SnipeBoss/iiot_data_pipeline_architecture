@@ -32,7 +32,7 @@ CREATE SEQUENCE SEQ_DIM_LINE
 START WITH 1 INCREMENT BY 1 NOCACHE;
 
 
--- 3. DIM_SHIFT — junk dim (DAY/NIGHT, seeded inline)
+-- 3. DIM_SHIFT —  (DAY/NIGHT, seeded inline)
 CREATE TABLE DIM_SHIFT (
     shift_id          NUMBER       PRIMARY KEY,
     shift_code        VARCHAR2(10) NOT NULL UNIQUE,

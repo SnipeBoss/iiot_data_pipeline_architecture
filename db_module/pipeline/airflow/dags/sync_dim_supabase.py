@@ -56,8 +56,11 @@ def load_stg_line(**ctx) -> None:
     log.info("extracted %d production_line rows", len(rows))
     bulk_insert(
         "STG_LINE",
-        columns=["line_id", "name", "area",
-                 "src_system", "pipeline_run_id"],
+        columns=["line_id",
+                 "name",
+                 "area",
+                 "src_system",
+                 "pipeline_run_id"],
         rows=payload,
         truncate=True,
     )
@@ -81,11 +84,18 @@ def load_stg_battery_model(**ctx) -> None:
     log.info("extracted %d battery_model rows", len(rows))
     bulk_insert(
         "STG_BATTERY_MODEL",
-        columns=["model_id", "model_code", "name",
-                 "spec_plate_count", "spec_weight_kg", "spec_terminal_type",
-                 "dim_length_mm", "dim_width_mm", "dim_height_mm",
+        columns=["model_id",
+                 "model_code",
+                 "name",
+                 "spec_plate_count",
+                 "spec_weight_kg",
+                 "spec_terminal_type",
+                 "dim_length_mm",
+                 "dim_width_mm",
+                 "dim_height_mm",
                  "is_active",
-                 "src_system", "pipeline_run_id"],
+                 "src_system",
+                 "pipeline_run_id"],
         rows=payload,
         truncate=True,
     )
@@ -108,9 +118,15 @@ def load_stg_machine(**ctx) -> None:
     log.info("extracted %d machine rows", len(rows))
     bulk_insert(
         "STG_MACHINE",
-        columns=["machine_id", "line_id", "machine_code", "machine_type",
-                 "sequence_position", "install_date", "is_active",
-                 "src_system", "pipeline_run_id"],
+        columns=["machine_id",
+                 "line_id",
+                 "machine_code",
+                 "machine_type",
+                 "sequence_position",
+                 "install_date",
+                 "is_active",
+                 "src_system",
+                 "pipeline_run_id"],
         rows=payload,
         truncate=True,
     )

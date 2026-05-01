@@ -8,7 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from db_module.db_conn import OracleConnector, SupabaseConnector
 
 
-"""One-shot ETL: sync master data จาก Supabase → Oracle DIM_* (รุ่นใหม่ 2026-04-26)
+"""
+One-shot ETL: 
+sync master data จาก Supabase → Oracle DIM_* (รุ่นใหม่ 2026-04-26)
 
 Pattern (สอดคล้องกับ Airflow DAG):
     Supabase OLTP → Oracle STG_* (transient buffer, truncate-and-load)
@@ -47,28 +49,42 @@ def _coerce(v):
     """
     import decimal
     import jpype
+
     if isinstance(v, dt.datetime):
         JTimestamp = jpype.JClass("java.sql.Timestamp")
         return JTimestamp.valueOf(v.strftime("%Y-%m-%d %H:%M:%S"))
+    
     if isinstance(v, dt.date):
         JDate = jpype.JClass("java.sql.Date")
         return JDate.valueOf(v.isoformat())
+    
     if isinstance(v, decimal.Decimal):
         return float(v)
+    
     return v
 
 
+
+
 def _bulk_insert(ora_cur, table: str, columns: list[str], rows: list[list]) -> int:
-    """TRUNCATE + bulk INSERT เข้า STG table ผ่าน JDBC"""
+    """
+    TRUNCATE + bulk INSERT เข้า STG table ผ่าน JDBC
+    """
     if not rows:
         return 0
+    
+    # Truncate -> Clear Table
     ora_cur.execute(f"TRUNCATE TABLE {table}")
     placeholders = ", ".join("?" for _ in columns)
     col_list = ", ".join(columns)
+
+    # Insert New Data
     sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
     coerced = [[_coerce(v) for v in row] for row in rows]
     ora_cur.executemany(sql, coerced)
     return len(rows)
+
+
 
 
 def seed() -> int:
@@ -92,26 +108,41 @@ def seed() -> int:
             FROM production_line
             ORDER BY line_id
         """)
+
         line_rows = [
             [src_id, name, area, SRC_SYSTEM, PIPELINE_RUN_ID]
             for src_id, name, area in sb_cur.fetchall()
         ]
+        
         n_line = _bulk_insert(
             ora_cur,
             "STG_LINE",
             ["line_id", "name", "area", "src_system", "pipeline_run_id"],
             line_rows,
         )
+        
         print(f"  STG_LINE          loaded {n_line} rows")
+
+
+
 
         # ---- STG_BATTERY_MODEL ----
         sb_cur.execute("""
-            SELECT model_id, model_code, name,
-                   spec_plate_count, spec_weight_kg, spec_terminal_type,
-                   dim_length_mm, dim_width_mm, dim_height_mm, is_active
+            SELECT model_id, 
+                       model_code, 
+                       name,
+                       spec_plate_count, 
+                       spec_weight_kg, 
+                       spec_terminal_type,
+                       dim_length_mm, 
+                       dim_width_mm, 
+                       dim_height_mm, 
+                       is_active
+
             FROM battery_model
             ORDER BY model_id
         """)
+
         bm_rows = [
             [
                 src_id, code, name,
@@ -120,12 +151,15 @@ def seed() -> int:
                 "Y" if is_active else "N",
                 SRC_SYSTEM, PIPELINE_RUN_ID,
             ]
+            
             for (
                 src_id, code, name,
                 plate_count, weight_kg, terminal,
                 length_mm, width_mm, height_mm, is_active,
             ) in sb_cur.fetchall()
         ]
+        
+        
         n_bm = _bulk_insert(
             ora_cur,
             "STG_BATTERY_MODEL",
@@ -138,6 +172,9 @@ def seed() -> int:
             bm_rows,
         )
         print(f"  STG_BATTERY_MODEL loaded {n_bm} rows")
+
+
+
 
         # ---- STG_MACHINE ----
         # Supabase machine ไม่มี is_active column → set 'Y' default
@@ -173,6 +210,9 @@ def seed() -> int:
 
         ora_conn.commit()
 
+
+
+
         # ============================================================
         # Step 2: Run SP_SYNC_ALL_DIMS (orchestrator: LINE → MODEL → MACHINE)
         # ============================================================
@@ -180,6 +220,9 @@ def seed() -> int:
         ora_cur.execute("BEGIN SP_SYNC_ALL_DIMS; END;")
         ora_conn.commit()
         print("  SP_SYNC_ALL_DIMS  ok")
+
+
+
 
         # ============================================================
         # Readback
@@ -192,6 +235,8 @@ def seed() -> int:
             ora_cur.execute(f"SELECT COUNT(*) FROM {t}")
             print(f"  {t:<18} {int(ora_cur.fetchone()[0])}")
         return 0
+    
+
     except Exception as exc:
         ora_conn.rollback()
         print(f"\nFAIL: {exc}")

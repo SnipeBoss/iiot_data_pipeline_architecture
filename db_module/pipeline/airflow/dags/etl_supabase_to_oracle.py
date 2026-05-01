@@ -7,7 +7,11 @@ from _oracle_api import bulk_insert, health
 from _supabase import supabase_cursor
 
 
-"""Extract Supabase OLTP → Oracle STG ตาม schema ใหม่ (2026-04-26)
+log = logging.getLogger(__name__)
+
+
+"""
+Extract Supabase OLTP → Oracle STG ตาม schema ใหม่ (2026-04-26)
 
 Architecture:
     Supabase ──psycopg2──▶ [DAG] ──HTTP bulk-insert──▶ Oracle API ──JDBC──▶ AI03 STG
@@ -28,7 +32,7 @@ Schema changes vs version 2026-04-19:
 """
 
 
-log = logging.getLogger(__name__)
+
 
 
 def _extract(sql: str, params: tuple) -> list[list]:
@@ -37,23 +41,40 @@ def _extract(sql: str, params: tuple) -> list[list]:
         return [list(row) for row in cur.fetchall()]
 
 
+
+
 def check_oracle_api(**_) -> None:
-    """Short-circuit DAG ถ้า Oracle API ไม่ตอบ"""
+    """
+    Short-circuit DAG ถ้า Oracle API ไม่ตอบ
+    """
     info = health()
+    
     log.info("oracle-api up: user=%s sysdate=%s",
-             info.get("oracle_user"), info.get("oracle_sysdate"))
+             info.get("oracle_user"), 
+             info.get("oracle_sysdate"))
+
+
+
+
+
+
 
 
 def load_production_batch(**ctx) -> None:
-    """ดึง batch ที่ end_time อยู่ใน 15-min window
+    """
+    ดึง batch ที่ end_time อยู่ใน 15-min window
 
     JOIN production_order เพื่อ carry planning data (model_id, planned_*)
     + sub-query order_total_qty (SUM ต่อ order) ส่งให้ SP คำนวณ batch share
     """
+    
+    # Get Configuration
     run_id = ctx["run_id"]
     start = ctx["data_interval_start"]
     end   = ctx["data_interval_end"]
 
+
+    # Query Method
     rows = _extract(
         """
         SELECT b.batch_id,
@@ -76,21 +97,40 @@ def load_production_batch(**ctx) -> None:
         """,
         (start, end),
     )
+
+
+
     payload = [r + ["SUPABASE", run_id] for r in rows]
     log.info("extracted %d production_batch rows for %s → %s", len(rows), start, end)
+    
+    
     bulk_insert(
         "STG_PRODUCTION_BATCH",
-        columns=["batch_id", "order_id", "line_id", "model_id",
-                 "qty_planned", "qty_out", "start_time", "end_time",
-                 "order_planned_start", "order_planned_end", "order_total_qty",
-                 "src_system", "pipeline_run_id"],
+        columns=["batch_id", 
+                 "order_id", 
+                 "line_id", 
+                 "model_id",
+                 "qty_planned", 
+                 "qty_out", 
+                 "start_time", 
+                 "end_time",
+                 "order_planned_start", 
+                 "order_planned_end", 
+                 "order_total_qty",
+                 "src_system", 
+                 "pipeline_run_id"],
         rows=payload,
         truncate=True,
     )
 
 
+
+
 def load_qc_record(**ctx) -> None:
-    """ดึง qc_record ที่ inspected_at อยู่ใน window"""
+    """
+    ดึง qc_record ที่ inspected_at อยู่ใน window
+    """
+    
     run_id = ctx["run_id"]
     start = ctx["data_interval_start"]
     end   = ctx["data_interval_end"]
@@ -108,18 +148,28 @@ def load_qc_record(**ctx) -> None:
     log.info("extracted %d qc_record rows for %s → %s", len(rows), start, end)
     bulk_insert(
         "STG_QC_RECORD",
-        columns=["qc_id", "batch_id", "qty_inspected", "qty_passed", "qty_failed",
-                 "inspected_at", "src_system", "pipeline_run_id"],
+        columns=["qc_id",
+                 "batch_id",
+                 "qty_inspected",
+                 "qty_passed",
+                 "qty_failed",
+                 "inspected_at",
+                 "src_system",
+                 "pipeline_run_id"],
         rows=payload,
         truncate=True,
     )
 
 
+
+
 def load_qc_defect(**ctx) -> None:
-    """ดึง qc_defect (M:N junction) ของ qc ที่ inspected ใน window
+    """
+    ดึง qc_defect (M:N junction) ของ qc ที่ inspected ใน window
 
     JOIN qc_record เพื่อ filter by inspected_at — defect บริสุทธิ์ไม่มี timestamp
     """
+
     run_id = ctx["run_id"]
     start = ctx["data_interval_start"]
     end   = ctx["data_interval_end"]
@@ -134,15 +184,25 @@ def load_qc_defect(**ctx) -> None:
         """,
         (start, end),
     )
+    
     payload = [r + ["SUPABASE", run_id] for r in rows]
     log.info("extracted %d qc_defect rows for %s → %s", len(rows), start, end)
     bulk_insert(
         "STG_QC_DEFECT",
-        columns=["qc_id", "defect_code", "qty_affected",
-                 "src_system", "pipeline_run_id"],
+        
+        columns=["qc_id", 
+                 "defect_code", 
+                 "qty_affected",
+                 "src_system", 
+                 "pipeline_run_id"],
+        
         rows=payload,
         truncate=True,
     )
+
+
+
+
 
 
 def load_downtime_event(**ctx) -> None:
@@ -183,13 +243,29 @@ def load_downtime_event(**ctx) -> None:
     log.info("extracted %d downtime_event rows for %s → %s", len(rows), start, end)
     bulk_insert(
         "STG_DOWNTIME_EVENT",
-        columns=["event_id", "machine_id", "machine_code", "line_id",
-                 "batch_id", "reason_code", "is_planned",
-                 "start_ts", "end_ts", "duration_min",
-                 "src_system", "pipeline_run_id"],
+        columns=["event_id",
+                 "machine_id",
+                 "machine_code",
+                 "line_id",
+                 "batch_id",
+                 "reason_code",
+                 "is_planned",
+                 "start_ts",
+                 "end_ts",
+                 "duration_min",
+                 "src_system",
+                 "pipeline_run_id"],
         rows=payload,
         truncate=True,
     )
+
+
+
+
+
+
+
+
 
 
 default_args = {

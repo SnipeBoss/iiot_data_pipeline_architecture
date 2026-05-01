@@ -32,7 +32,6 @@ def health() -> dict:
     # Define Connection to Oracle
     connector = get_connector()
 
-
     try:
 
         # Set Connection by query the Select user
@@ -54,20 +53,30 @@ def health() -> dict:
 
 
 
+
 @router.post("/sp/call")
 def sp_call(req: SpCallRequest) -> dict:
     """
     เรียก stored procedure: BEGIN <name>(:1, :2, ...); END;
     """
+    
+    # Modified the Query Structured
     placeholders = ", ".join("?" for _ in req.args)
     body = f"BEGIN {req.name}({placeholders}); END;"
+    
+    # Connection to Oracle Databases
     connector = get_connector()
+
+    # Connection and Send Query
     with connector.cursor() as cur:
         if req.args:
             cur.execute(body, prepare_row(req.args))
         else:
             cur.execute(f"BEGIN {req.name}; END;")
+
     return {"ok": True, "procedure": req.name}
+
+
 
 
 
@@ -80,18 +89,27 @@ def bulk_insert(req: BulkInsertRequest) -> dict:
     ถ้า truncate=True → TRUNCATE ก่อน (ใช้ทำ idempotent reload)
     คืน {"rowcount": N, "truncated": bool}
     """
+
+    
     if not req.rows:
         return {"rowcount": 0, "truncated": False}
 
+    # Modified Input 
     placeholders = ", ".join("?" for _ in req.columns)
     col_list = ", ".join(req.columns)
+
+    # Set Query for Insert Data
     sql = f"INSERT INTO {req.table} ({col_list}) VALUES ({placeholders})"
 
+
+    # Set Connection
     connector = get_connector()
     conn = connector.connect()
+
     try:
         cur = conn.cursor()
         truncated = False
+    
         try:
             if req.truncate:
                 cur.execute(f"TRUNCATE TABLE {req.table}")
@@ -100,10 +118,13 @@ def bulk_insert(req: BulkInsertRequest) -> dict:
             cur.executemany(sql, prepared)
             conn.commit()
             return {"rowcount": len(req.rows), "truncated": truncated}
+    
         except Exception:
             conn.rollback()
             raise
+    
         finally:
             cur.close()
+    
     finally:
         conn.close()

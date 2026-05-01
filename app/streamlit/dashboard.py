@@ -12,6 +12,9 @@ for p in (_REPO_ROOT, _STREAMLIT_DIR):
 
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv(_REPO_ROOT / ".env", override=False)
 
 """
 Streamlit entry point — sidebar nav + landing page (renders README.md)
@@ -58,7 +61,7 @@ st.sidebar.divider()
 
 
 # FastAPI status indicator
-api_url = os.getenv("ORACLE_API_URL")
+api_url = os.getenv("DASHBOARD_API_URL", os.getenv("ORACLE_API_URL", "http://localhost:8000"))
 token = os.getenv("ORACLE_API_TOKEN", "")
 headers = {
     "Authorization": f"Bearer {token}"

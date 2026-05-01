@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from db_module.db_conn import OracleConnector
 
 
-"""ตรวจสอบว่า DW objects ครบถ้วนใน AI03 หลังรัน DDL ใหม่ (7 ไฟล์ใน query/)
+"""
+ตรวจสอบว่า DW objects ครบถ้วนใน AI03 หลังรัน DDL ใหม่ (7 ไฟล์ใน query/)
 
 EXPECTED ตรงกับโครงสร้างใหม่หลัง recreate (2026-04-26):
 - 20 tables (7 DIM + 5 FACT + 8 STG)
@@ -37,6 +38,7 @@ EXPECTED_TABLES = [
     "STG_LINE", "STG_BATTERY_MODEL", "STG_MACHINE",
 ]
 
+
 # 9 sequences — 4 DIM + 5 FACT
 # DIM_DATE/DIM_SHIFT/DIM_METRIC ไม่มี SEQ (smart key / seeded inline)
 EXPECTED_SEQUENCES = [
@@ -45,6 +47,7 @@ EXPECTED_SEQUENCES = [
     "SEQ_FACT_PRODUCTION", "SEQ_FACT_QUALITY",
     "SEQ_FACT_DEFECT", "SEQ_FACT_DOWNTIME", "SEQ_FACT_SENSOR",
 ]
+
 
 # 10 procedures
 EXPECTED_PROCEDURES = [
@@ -57,6 +60,7 @@ EXPECTED_PROCEDURES = [
     "SP_LOAD_FACT_SENSOR", "SP_LOAD_ALL_FACTS",
 ]
 
+
 # 1 function
 EXPECTED_FUNCTIONS = [
     "FN_GET_SHIFT_ID",
@@ -64,7 +68,9 @@ EXPECTED_FUNCTIONS = [
 
 
 def main() -> int:
-    """Query AI03 schema + เทียบกับ EXPECTED_*"""
+    """
+    Query AI03 schema + เทียบกับ EXPECTED_*
+    """
     with OracleConnector().cursor() as cur:
         cur.execute("SELECT table_name FROM user_tables ORDER BY table_name")
         tables = {str(r[0]) for r in cur.fetchall()}
@@ -82,10 +88,12 @@ def main() -> int:
         )
         functions = {str(r[0]) for r in cur.fetchall()}
 
+
     missing_t = [t for t in EXPECTED_TABLES if t not in tables]
     missing_s = [s for s in EXPECTED_SEQUENCES if s not in sequences]
     missing_p = [p for p in EXPECTED_PROCEDURES if p not in procedures]
     missing_f = [f for f in EXPECTED_FUNCTIONS if f not in functions]
+
 
     print(f"Tables in AI03: {len(tables)} (expected {len(EXPECTED_TABLES)})")
     for t in EXPECTED_TABLES:
@@ -113,6 +121,7 @@ def main() -> int:
         return 1
     print("\nOK — all expected objects present.")
     return 0
+
 
 
 if __name__ == "__main__":
