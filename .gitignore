@@ -40,4 +40,8 @@ test/
 app/streamlit/cache/
 
 # Compiled SQL/markdown artifacts
-markdown/dw_schema_compact.sql
+markdown/
+
+# Local presentation/scratch artifacts
+*.html
+image.svg
