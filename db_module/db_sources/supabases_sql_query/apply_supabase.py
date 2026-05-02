@@ -71,12 +71,15 @@ def apply_all(paths: list[Path]) -> int:
     connector = SupabaseConnector()
     conn = connector.connect()
     cur = conn.cursor()
+
     try:
+    
         for path in paths:
             sql = path.read_text()
             # แสดง path แบบ relative จาก repo root เพื่อ log อ่านง่าย
             print(f"[apply] {path.relative_to(HERE.parent.parent)} ({len(sql):,} bytes)")
             cur.execute(sql)
+    
         conn.commit()
         print("\nOK — all files applied and committed.")
 
@@ -86,14 +89,19 @@ def apply_all(paths: list[Path]) -> int:
             cur.execute(f"SELECT COUNT(*) FROM {table}")
             print(f"  {table:<24} {cur.fetchone()[0]:>6}")
         return 0
+
     except Exception as exc:
+    
         # Rollback ทั้ง transaction เพื่อไม่ให้ Supabase เหลือ state ครึ่ง ๆ
         conn.rollback()
         print(f"\nFAIL: {exc}")
         return 1
+    
     finally:
         cur.close()
         conn.close()
+
+
 
 
 def main() -> int:
@@ -101,6 +109,8 @@ def main() -> int:
     args = [Path(a) for a in sys.argv[1:]]
     paths = args if args else DEFAULT_FILES
     return apply_all(paths)
+
+
 
 
 if __name__ == "__main__":

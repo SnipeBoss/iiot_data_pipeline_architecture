@@ -94,11 +94,6 @@ COMMIT;
 
 
 
-
-
-
-
-
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  3. DIM_METRIC — sensor metric definitions               │
 -- │     metric_name MUST match Influx field name exactly     │
