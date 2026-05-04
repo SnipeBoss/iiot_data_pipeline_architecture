@@ -13,7 +13,7 @@ import requests
 
 log = logging.getLogger(__name__)
 
-_BASE_URL = os.environ.get("ORACLE_API_URL", "http://host.docker.internal:8000")
+_BASE_URL = os.environ.get("ORACLE_API_URL")
 _TOKEN = os.environ.get("ORACLE_API_TOKEN", "")
 _TIMEOUT_S = int(os.environ.get("ORACLE_API_TIMEOUT", "120"))
 

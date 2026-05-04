@@ -1,48 +1,54 @@
 -- ============================================================
--- FACT Load Procedures (transform STG → FACT)
+-- Stored Procedure สำหรับโหลด FACT (transform STG → FACT)
 --
--- Pattern: MERGE BY business key (idempotent at key level)
--- Why: 15-min DAG cadence may rerun overlapping windows
---      → ลบ row ที่ key match กับ STG ปัจจุบัน, ใส่ใหม่
+-- รูปแบบ: ใช้ business key เป็นตัวอ้างอิง (idempotent ที่ระดับ key)
+-- เหตุผล: DAG รันทุก 15 นาที อาจรันซ้ำในช่วง window ที่ทับกัน
+--         → ลบ row ที่ key ตรงกับ STG ปัจจุบัน แล้วค่อย insert ใหม่
 -- ============================================================
 
 -- ┌──────────────────────────────────────────────────────────┐
--- │  Helper function: derive shift_id from timestamp         │
+-- │  Helper function: derive shift_id จาก timestamp          │
 -- │  DAY:   07:30-16:30 → shift_id=1                         │
 -- │  NIGHT: 17:30-06:30 → shift_id=2                         │
 -- └──────────────────────────────────────────────────────────┘
-CREATE OR REPLACE FUNCTION FN_GET_SHIFT_ID(p_ts TIMESTAMP) 
+CREATE OR REPLACE FUNCTION FN_GET_SHIFT_ID(p_ts TIMESTAMP)
 RETURN NUMBER AS
     v_minutes_of_day NUMBER;
 BEGIN
     IF p_ts IS NULL THEN RETURN NULL; END IF;
-    
-    v_minutes_of_day := EXTRACT(HOUR   FROM p_ts) * 60 
+
+    -- แปลงเวลาในวันให้เป็น "นาทีตั้งแต่เที่ยงคืน" เพื่อเปรียบเทียบง่าย
+    v_minutes_of_day := EXTRACT(HOUR   FROM p_ts) * 60
                       + EXTRACT(MINUTE FROM p_ts);
-    
+
     -- DAY: 07:30 (450) <= t < 16:30 (990)
-    -- NIGHT: t >= 17:30 (1050) OR t < 06:30 (390)
+    -- NIGHT: t >= 17:30 (1050) หรือ t < 06:30 (390)
     IF v_minutes_of_day >= 450 AND v_minutes_of_day < 990 THEN
-        RETURN 1;  -- DAY
+        RETURN 1;  -- กะกลางวัน
     ELSE
-        RETURN 2;  -- NIGHT (includes handover gaps for simplicity)
+        RETURN 2;  -- กะกลางคืน (รวมช่วงคาบเกี่ยวก่อน/หลังกะเพื่อความเรียบง่าย)
     END IF;
 END FN_GET_SHIFT_ID;
 /
 
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  SP_LOAD_FACT_PRODUCTION                                 │
--- │  Source: STG_PRODUCTION_BATCH (only end_time IS NOT NULL)│
+-- │  Source: STG_PRODUCTION_BATCH (เฉพาะ batch ที่ปิดแล้ว)   │
 -- │  Derive: shift_id, batch_planned (FIFO), slippage        │
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_LOAD_FACT_PRODUCTION AS
 BEGIN
-    -- Step 1: DELETE rows ที่ key match กับ STG (idempotency)
+    -- Step 1: DELETE row ที่ key match กับ STG (idempotency)
     DELETE FROM FACT_PRODUCTION
     WHERE batch_src_id IN (SELECT batch_id FROM STG_PRODUCTION_BATCH);
-    
-    -- Step 2: INSERT with FK lookup + derived columns
-    -- Cursor FOR-LOOP because Oracle 10g forbids SEQ.NEXTVAL in INSERT...SELECT
+
+    -- Step 2: INSERT พร้อม lookup FK และคำนวณคอลัมน์ derive
+    -- ใช้ cursor FOR-LOOP เพราะ Oracle 10g ห้ามใช้ SEQ.NEXTVAL ใน INSERT...SELECT
     FOR rec IN (
         SELECT 
             stg.batch_id,
@@ -56,7 +62,7 @@ BEGIN
             stg.order_planned_start,
             stg.order_planned_end,
             stg.order_total_qty,
-            -- Cumulative qty before this batch (FIFO order)
+            -- จำนวนสะสมก่อนหน้า batch นี้ (เรียงแบบ FIFO ตาม batch_id)
             (SELECT NVL(SUM(qty_planned), 0)
                FROM STG_PRODUCTION_BATCH inner_stg
               WHERE inner_stg.order_id = stg.order_id
@@ -77,23 +83,23 @@ BEGIN
             v_dim_shift_id   NUMBER;
             v_dim_date_id    NUMBER;
         BEGIN
-            -- FIFO planning derivation
-            v_order_dur_min := (CAST(rec.order_planned_end AS DATE) 
+            -- คำนวณแผน batch แบบ FIFO (แบ่งสัดส่วนเวลาตาม qty)
+            v_order_dur_min := (CAST(rec.order_planned_end AS DATE)
                               - CAST(rec.order_planned_start AS DATE)) * 24 * 60;
             v_batch_share   := rec.qty_planned / NULLIF(rec.order_total_qty, 0);
             v_batch_est_min := v_order_dur_min * v_batch_share;
-            v_planned_start := rec.order_planned_start 
-                             + (rec.cum_qty_before / NULLIF(rec.order_total_qty,0)) 
+            v_planned_start := rec.order_planned_start
+                             + (rec.cum_qty_before / NULLIF(rec.order_total_qty,0))
                                * (rec.order_planned_end - rec.order_planned_start);
-            v_planned_end   := v_planned_start 
+            v_planned_end   := v_planned_start
                              + NUMTODSINTERVAL(v_batch_est_min * 60, 'SECOND');
-            
-            -- Slippage = actual_duration - planned_duration
-            v_actual_dur_min := (CAST(rec.end_time AS DATE) 
+
+            -- Slippage = ระยะเวลาจริง - ระยะเวลาที่วางแผนไว้
+            v_actual_dur_min := (CAST(rec.end_time AS DATE)
                                - CAST(rec.start_time AS DATE)) * 24 * 60;
             v_slippage_min   := v_actual_dur_min - v_batch_est_min;
-            
-            -- DIM lookups (business key → surrogate)
+
+            -- Lookup DIM (แปลง business key → surrogate key)
             SELECT line_id INTO v_dim_line_id
               FROM DIM_LINE WHERE line_src_id = rec.line_id;
             
@@ -133,10 +139,16 @@ EXCEPTION
 END SP_LOAD_FACT_PRODUCTION;
 /
 
+
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  SP_LOAD_FACT_QUALITY                                    │
 -- │  Source: STG_QC_RECORD JOIN STG_PRODUCTION_BATCH         │
--- │  (need batch context for line/model/shift dims)          │
+-- │  (ต้องดึง context ของ batch เพื่อหา dim line/model/shift)│
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_LOAD_FACT_QUALITY AS
 BEGIN
@@ -194,10 +206,16 @@ EXCEPTION
 END SP_LOAD_FACT_QUALITY;
 /
 
+
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  SP_LOAD_FACT_DEFECT                                     │
 -- │  Source: STG_QC_DEFECT JOIN STG_QC_RECORD JOIN STG_BATCH │
--- │  Lookup: DIM_DEFECT_TYPE by defect_code                  │
+-- │  Lookup: DIM_DEFECT_TYPE โดยใช้ defect_code              │
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_LOAD_FACT_DEFECT AS
 BEGIN
@@ -231,16 +249,16 @@ BEGIN
             SELECT model_id INTO v_dim_model_id
               FROM DIM_BATTERY_MODEL WHERE model_src_id = rec.src_model_id;
 
-            -- Lookup DIM_DEFECT_TYPE by code
-            -- Skip row silently if defect_code not in DIM (data quality issue)
+            -- Lookup DIM_DEFECT_TYPE จาก defect_code
+            -- ถ้าไม่เจอใน DIM (data quality issue) ให้ข้าม row นั้นเงียบ ๆ
             BEGIN
                 SELECT defect_id INTO v_dim_defect_id
                   FROM DIM_DEFECT_TYPE
                  WHERE defect_code = rec.defect_code
-                   AND is_leaf = 'Y';   -- only leaf nodes are valid
+                   AND is_leaf = 'Y';   -- รับเฉพาะ leaf node เท่านั้น
             EXCEPTION
                 WHEN NO_DATA_FOUND THEN
-                    v_skip := TRUE;   -- skip orphan defect codes (Oracle 10g compat)
+                    v_skip := TRUE;   -- ข้าม code ที่ไม่มีใน DIM (เลี่ยง CONTINUE สำหรับ Oracle 10g)
             END;
 
             IF NOT v_skip THEN
@@ -265,10 +283,16 @@ EXCEPTION
 END SP_LOAD_FACT_DEFECT;
 /
 
+
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  SP_LOAD_FACT_DOWNTIME                                   │
--- │  Source: STG_DOWNTIME_EVENT (closed events only)         │
--- │  Filter: end_ts IS NOT NULL (don't load open events)     │
+-- │  Source: STG_DOWNTIME_EVENT (เฉพาะ event ที่ปิดแล้ว)     │
+-- │  Filter: end_ts IS NOT NULL (ไม่โหลด event ที่ยังเปิดอยู่)│
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_LOAD_FACT_DOWNTIME AS
 BEGIN
@@ -314,15 +338,21 @@ EXCEPTION
 END SP_LOAD_FACT_DOWNTIME;
 /
 
+
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  SP_LOAD_FACT_SENSOR                                     │
--- │  Source: STG_SENSOR_AGG (from InfluxDB Flux 15-min agg) │
--- │  Lookup: DIM_MACHINE by machine_code, DIM_METRIC by name │
+-- │  Source: STG_SENSOR_AGG (มาจาก Flux aggregation 15 นาที) │
+-- │  Lookup: DIM_MACHINE จาก machine_code, DIM_METRIC จาก name│
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_LOAD_FACT_SENSOR AS
 BEGIN
-    -- Composite delete key (machine_id, metric_id, window_start)
-    -- because same (machine, metric) can have many windows
+    -- ใช้ composite key (machine_id, metric_id, window_start) เป็นตัวลบ
+    -- เพราะ (machine, metric) เดียวกันมีหลาย window ได้
     DELETE FROM FACT_SENSOR
     WHERE (machine_id, metric_id, window_start) IN (
         SELECT dm.machine_id, dmt.metric_id, stg.window_start
@@ -366,16 +396,21 @@ EXCEPTION
 END SP_LOAD_FACT_SENSOR;
 /
 
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
--- │  Master orchestrator — load all FACTs in dependency order│
--- │  Order: PRODUCTION → QUALITY → DEFECT → DOWNTIME → SENSOR│
+-- │  Master orchestrator — โหลด FACT ทุกตัวตามลำดับ dependency│
+-- │  ลำดับ: PRODUCTION → QUALITY → DEFECT → DOWNTIME → SENSOR │
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_LOAD_ALL_FACTS AS
 BEGIN
     SP_LOAD_FACT_PRODUCTION;
     SP_LOAD_FACT_QUALITY;
-    SP_LOAD_FACT_DEFECT;        -- depends on QC_RECORD + PRODUCTION_BATCH
+    SP_LOAD_FACT_DEFECT;        -- ขึ้นกับ QC_RECORD + PRODUCTION_BATCH
     SP_LOAD_FACT_DOWNTIME;
-    SP_LOAD_FACT_SENSOR;        -- independent of OLTP
+    SP_LOAD_FACT_SENSOR;        -- ไม่ขึ้นกับ OLTP
 END SP_LOAD_ALL_FACTS;
 /

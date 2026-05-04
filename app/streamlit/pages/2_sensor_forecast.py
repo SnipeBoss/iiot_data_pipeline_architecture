@@ -40,6 +40,7 @@ filters = filter_row_forecast(metrics_list)
 # Extract informations
 machine = filters["machine"]
 metric = filters["metric"]
+lookback_days = int(filters["lookback"].split()[0])
 horizon_hours = int(filters["horizon"].split()[0])
 train_clicked = filters["train_clicked"]
 
@@ -49,12 +50,12 @@ metric_meta = next((m for m in metrics_list if m.get("metric_name") == metric), 
 threshold = metric_meta.get("critical_threshold")
 
 
-# Fetch historical (last 7 days) 
+# Fetch historical (last N days ตาม lookback filter)
 end_date = datetime.date.today()
 all_history: list[dict] = []
 
 
-for i in range(7):
+for i in range(lookback_days):
 
     d = end_date - datetime.timedelta(days=i)
 
@@ -76,9 +77,8 @@ for i in range(7):
         # หากวันใดดึงไม่ได้ ก็ skip (ดึง 7 วันต่อเนื่อง — บางวันอาจไม่มีข้อมูล)
         continue
 
-# Set to dataframe 
+# Set to dataframe
 history_df = pd.DataFrame(all_history)
-
 
 
 if not history_df.empty:
@@ -92,6 +92,11 @@ if not history_df.empty:
     # Format='mixed' — Oracle TIMESTAMP บางแถวมี fractional seconds บางแถวไม่มี
     history_df["ds"] = pd.to_datetime(history_df["ds"], format="mixed")
     history_df = history_df.sort_values("ds").reset_index(drop=True)
+
+else:
+    # ไม่มี history (API ดึง 0 rows ทั้ง 7 วัน) — สร้าง empty frame ที่มี ds/y
+    # เพื่อให้ downstream (forecast_chart) เข้าถึง column ได้โดยไม่ KeyError
+    history_df = pd.DataFrame(columns=["ds", "y"])
 
 
 

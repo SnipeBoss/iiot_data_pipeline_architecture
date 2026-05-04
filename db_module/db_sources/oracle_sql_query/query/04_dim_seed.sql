@@ -1,6 +1,6 @@
 -- ┌──────────────────────────────────────────────────────────┐
--- │  1. DIM_DATE — 5 years calendar (2024-2028)              │
--- │     Smart key YYYYMMDD, no sequence                      │
+-- │  1. DIM_DATE — ปฏิทิน 5 ปี (2024-2028)                   │
+-- │     ใช้ smart key รูปแบบ YYYYMMDD, ไม่ใช้ sequence       │
 -- └──────────────────────────────────────────────────────────┘
 DECLARE
     start_date    DATE := DATE '2024-01-01';
@@ -11,29 +11,40 @@ DECLARE
 
 BEGIN
 
-    -- Set Current Date
+    -- กำหนดค่าเริ่มต้นให้วันที่ปัจจุบัน
     v_curr_date := start_date;
 
-    -- Loop ทุกวันใน range
+    -- วน loop ทุกวันใน range ที่กำหนด
     WHILE v_curr_date <= end_date LOOP
 
-        -- Calculate Value
+        -- คำนวณ smart key (YYYYMMDD) และเลขวันแบบ ISO (1=จันทร์..7=อาทิตย์)
         current_id := TO_NUMBER(TO_CHAR(v_curr_date, 'YYYYMMDD'));
         iso_dow    := (TRUNC(v_curr_date) - TRUNC(v_curr_date, 'IW')) + 1;
 
-        -- MERGE
+
+        -- MERGE: insert ถ้ายังไม่มี date_id นี้ในตาราง (idempotent)
         MERGE INTO DIM_DATE
         USING (
-            SELECT current_id AS new_date_id 
+            SELECT current_id AS new_date_id
             FROM DUAL
-        ) source_row 
+        ) source_row
         ON (DIM_DATE.date_id = source_row.new_date_id)
 
 
+
         WHEN NOT MATCHED THEN INSERT (
-            date_id, full_date, year, quarter, month_number, month_name,
-            week_number, day_of_month, day_of_week, day_name,
-            is_weekend, is_holiday
+            date_id, 
+            full_date, 
+            year, 
+            quarter, 
+            month_number, 
+            month_name,
+            week_number, 
+            day_of_month, 
+            day_of_week, 
+            day_name,
+            is_weekend, 
+            is_holiday
         ) VALUES (
             current_id,
             v_curr_date,
@@ -44,11 +55,11 @@ BEGIN
             TO_NUMBER(TO_CHAR(v_curr_date, 'IW')),
             EXTRACT(DAY FROM v_curr_date),
 
-            -- ISO day_of_week: 1=Mon..7=Sun (locale-independent)
+            -- ISO day_of_week: 1=จันทร์..7=อาทิตย์ (ไม่ขึ้นกับ locale)
             iso_dow,
             TO_CHAR(v_curr_date, 'Day', 'NLS_DATE_LANGUAGE=ENGLISH'),
 
-            -- Saturday=6, Sunday=7 → Y, weekday → N
+            -- เสาร์=6, อาทิตย์=7 → Y, วันธรรมดา → N
             CASE WHEN iso_dow IN (6, 7) THEN 'Y' ELSE 'N' END,
             'N'
         );
@@ -61,31 +72,52 @@ END;
 /
 
 
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
--- │  2. DIM_SHIFT — junk dim (DAY/NIGHT)                     │
--- │     2 rows fixed, ไม่ใช้ sequence                        │
+-- │  2. DIM_SHIFT — junk dimension (กะ DAY/NIGHT)            │
+-- │     ค่าคงที่ 2 แถว, ไม่ใช้ sequence                       │
 -- └──────────────────────────────────────────────────────────┘
 
--- Day shift (07:30-16:30)
+
+-- กะกลางวัน (07:30-16:30)
 MERGE INTO DIM_SHIFT
 USING (SELECT 1 AS new_shift_id FROM DUAL) source_row
     ON (DIM_SHIFT.shift_id = source_row.new_shift_id)
 
 WHEN NOT MATCHED THEN INSERT (
-    shift_id, shift_code, shift_name,
-    start_hour, start_minute, end_hour, end_minute, crosses_midnight
+    shift_id, 
+    shift_code, 
+    shift_name, 
+    start_hour, 
+    start_minute, 
+    end_hour, 
+    end_minute, 
+    crosses_midnight
 ) VALUES (
     1, 'DAY', 'Day Shift', 7, 30, 16, 30, 'N'
 );
 
--- Night shift (17:30-06:30 next day)
+
+
+
+
+
+-- กะกลางคืน (17:30 ถึง 06:30 วันถัดไป — crosses_midnight=Y)
 MERGE INTO DIM_SHIFT
 USING (SELECT 2 AS new_shift_id FROM DUAL) source_row
     ON (DIM_SHIFT.shift_id = source_row.new_shift_id)
 
 WHEN NOT MATCHED THEN INSERT (
-    shift_id, shift_code, shift_name,
-    start_hour, start_minute, end_hour, end_minute, crosses_midnight
+    shift_id, 
+    shift_code, 
+    shift_name, 
+    start_hour, 
+    start_minute, 
+    end_hour, 
+    end_minute, 
+    crosses_midnight
 ) VALUES (
     2, 'NIGHT', 'Night Shift', 17, 30, 6, 30, 'Y'
 );
@@ -94,12 +126,14 @@ COMMIT;
 
 
 
+
+
 -- ┌──────────────────────────────────────────────────────────┐
--- │  3. DIM_METRIC — sensor metric definitions               │
--- │     metric_name MUST match Influx field name exactly     │
+-- │  3. DIM_METRIC — นิยามค่าตัววัดจาก sensor                │
+-- │     metric_name ต้องตรงกับชื่อ field ใน Influx    │
 -- └──────────────────────────────────────────────────────────┘
 
--- M01: Furnace temperature
+-- M01: อุณหภูมิเตาหลอม
 MERGE INTO DIM_METRIC
 USING (SELECT 1 AS new_metric_id FROM DUAL) source_row
     ON (DIM_METRIC.metric_id = source_row.new_metric_id)
@@ -112,7 +146,10 @@ WHEN NOT MATCHED THEN INSERT (
     25, 70, 80, 'Furnace temperature reading'
 );
 
--- All machines: run/idle indicator
+
+
+
+-- ทุกเครื่อง: สถานะ run/idle (machine_code = NULL หมายถึงใช้ร่วมทุกเครื่อง)
 MERGE INTO DIM_METRIC
 USING (SELECT 2 AS new_metric_id FROM DUAL) source_row
     ON (DIM_METRIC.metric_id = source_row.new_metric_id)
@@ -125,7 +162,11 @@ WHEN NOT MATCHED THEN INSERT (
     0, 1, NULL, 'Run/idle indicator (0=idle, 1=running)'
 );
 
--- M02: Cycle count
+
+
+
+
+-- M02: จำนวนรอบการทำงาน (cycle) ต่อหน้าต่าง 15 นาที
 MERGE INTO DIM_METRIC
 USING (SELECT 3 AS new_metric_id FROM DUAL) source_row
     ON (DIM_METRIC.metric_id = source_row.new_metric_id)
@@ -138,7 +179,10 @@ WHEN NOT MATCHED THEN INSERT (
     0, 900, NULL, 'Cycle count per 15-min window'
 );
 
--- M02: Vibration
+
+
+
+-- M02: ค่าการสั่นสะเทือน (RMS amplitude)
 MERGE INTO DIM_METRIC
 USING (SELECT 4 AS new_metric_id FROM DUAL) source_row
     ON (DIM_METRIC.metric_id = source_row.new_metric_id)
@@ -151,7 +195,11 @@ WHEN NOT MATCHED THEN INSERT (
     0, 3, 5, 'Vibration RMS amplitude'
 );
 
--- M03: Welding current
+
+
+
+
+-- M03: กระแสไฟฟ้าในการเชื่อม
 MERGE INTO DIM_METRIC
 USING (SELECT 5 AS new_metric_id FROM DUAL) source_row
     ON (DIM_METRIC.metric_id = source_row.new_metric_id)
@@ -164,7 +212,10 @@ WHEN NOT MATCHED THEN INSERT (
     0, 50, 60, 'Welding current'
 );
 
--- M03: Welding voltage
+
+
+
+-- M03: แรงดันไฟฟ้าในการเชื่อม
 MERGE INTO DIM_METRIC
 USING (SELECT 6 AS new_metric_id FROM DUAL) source_row
     ON (DIM_METRIC.metric_id = source_row.new_metric_id)
@@ -183,15 +234,17 @@ COMMIT;
 
 
 
+
+
 -- ┌──────────────────────────────────────────────────────────┐
--- │  4. DIM_DEFECT_TYPE — recursive hierarchy (20 rows)      │
--- │     Order: parents (5) first, then leaves (15)           │
--- │     Reason: child rows reference parent_defect_id (FK)   │
+-- │  4. DIM_DEFECT_TYPE — ลำดับชั้น recursive (20 แถว)       │
+-- │     ลำดับ insert: parent (5 แถว) ก่อน แล้วค่อย leaf (15) │
+-- │     เหตุผล: leaf อ้างอิง parent_defect_id เป็น FK        │
 -- └──────────────────────────────────────────────────────────┘
 
 -- ── Parents (hierarchy_level=1, is_leaf=N) ────────────────
 
--- Root 1: TERMINAL
+-- Root 1: TERMINAL — กลุ่ม defect ของขั้วแบตเตอรี่
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 1 AS new_defect_id FROM DUAL) source_row
     ON (DIM_DEFECT_TYPE.defect_id = source_row.new_defect_id)
@@ -204,7 +257,7 @@ WHEN NOT MATCHED THEN INSERT (
     1, 'N', 'Terminal-related defects', NULL, 'ROOT'
 );
 
--- Root 2: COVER
+-- Root 2: COVER — กลุ่ม defect ของฝาครอบ
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 2 AS new_defect_id FROM DUAL) source_row
     ON (DIM_DEFECT_TYPE.defect_id = source_row.new_defect_id)
@@ -217,7 +270,7 @@ WHEN NOT MATCHED THEN INSERT (
     1, 'N', 'Cover-related defects', NULL, 'ROOT'
 );
 
--- Root 3: WELDING
+-- Root 3: WELDING — กลุ่ม defect ของรอยเชื่อม
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 3 AS new_defect_id FROM DUAL) source_row
     ON (DIM_DEFECT_TYPE.defect_id = source_row.new_defect_id)
@@ -230,7 +283,7 @@ WHEN NOT MATCHED THEN INSERT (
     1, 'N', 'Welding joint defects', NULL, 'ROOT'
 );
 
--- Root 4: PLATE
+-- Root 4: PLATE — กลุ่ม defect ของการจัดเรียงแผ่นธาตุ
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 4 AS new_defect_id FROM DUAL) source_row
     ON (DIM_DEFECT_TYPE.defect_id = source_row.new_defect_id)
@@ -243,7 +296,7 @@ WHEN NOT MATCHED THEN INSERT (
     1, 'N', 'Plate arrangement defects', NULL, 'ROOT'
 );
 
--- Root 5: CASING
+-- Root 5: CASING — กลุ่ม defect ของตัวเรือนแบตเตอรี่
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 5 AS new_defect_id FROM DUAL) source_row
     ON (DIM_DEFECT_TYPE.defect_id = source_row.new_defect_id)
@@ -257,7 +310,11 @@ WHEN NOT MATCHED THEN INSERT (
 );
 
 
--- ── Terminal leaves (parent_defect_id=1) ──────────────────
+
+
+
+
+-- ── Leaf ของกลุ่ม Terminal (parent_defect_id=1) ───────────
 
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 6 AS new_defect_id FROM DUAL) source_row
@@ -296,7 +353,11 @@ WHEN NOT MATCHED THEN INSERT (
 );
 
 
--- ── Cover leaves (parent_defect_id=2) ─────────────────────
+
+
+
+
+-- ── Leaf ของกลุ่ม Cover (parent_defect_id=2) ──────────────
 
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 9 AS new_defect_id FROM DUAL) source_row
@@ -335,7 +396,10 @@ WHEN NOT MATCHED THEN INSERT (
 );
 
 
--- ── Welding leaves (parent_defect_id=3) ───────────────────
+
+
+
+-- ── Leaf ของกลุ่ม Welding (parent_defect_id=3) ────────────
 
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 12 AS new_defect_id FROM DUAL) source_row
@@ -374,7 +438,11 @@ WHEN NOT MATCHED THEN INSERT (
 );
 
 
--- ── Plate leaves (parent_defect_id=4) ─────────────────────
+
+
+
+
+-- ── Leaf ของกลุ่ม Plate (parent_defect_id=4) ──────────────
 
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 15 AS new_defect_id FROM DUAL) source_row
@@ -413,7 +481,7 @@ WHEN NOT MATCHED THEN INSERT (
 );
 
 
--- ── Casing leaves (parent_defect_id=5) ────────────────────
+-- ── Leaf ของกลุ่ม Casing (parent_defect_id=5) ─────────────
 
 MERGE INTO DIM_DEFECT_TYPE
 USING (SELECT 18 AS new_defect_id FROM DUAL) source_row
@@ -457,9 +525,9 @@ COMMIT;
 
 
 -- ┌──────────────────────────────────────────────────────────┐
--- │  Verification queries                                     │
--- │  Expected counts:                                         │
--- │    DIM_DATE         1827 (5 years)                        │
+-- │  Query สำหรับตรวจสอบจำนวนแถวหลัง seed                    │
+-- │  จำนวนที่คาดหวัง:                                         │
+-- │    DIM_DATE         1827 (5 ปี)                           │
 -- │    DIM_SHIFT           2                                  │
 -- │    DIM_METRIC          6                                  │
 -- │    DIM_DEFECT_TYPE    20                                  │

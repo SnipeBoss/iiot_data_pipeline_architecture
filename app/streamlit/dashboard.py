@@ -16,19 +16,6 @@ from dotenv import load_dotenv
 
 load_dotenv(_REPO_ROOT / ".env", override=False)
 
-"""
-Streamlit entry point — sidebar nav + landing page (renders README.md)
-
-Pages auto-discovered โดย Streamlit จาก `pages/` folder
-Filters อยู่ใน page (ไม่ใช่ sidebar) — sidebar = nav + status เท่านั้น
-
-Run (จาก app/streamlit/):
-    cd app/streamlit && ../../.venv/bin/streamlit run dashboard.py
-
-หรือ จาก repo root:
-    STREAMLIT_CONFIG_DIR=app/streamlit/.streamlit \\
-        .venv/bin/streamlit run app/streamlit/dashboard.py
-"""
 
 
 # Set Page Template

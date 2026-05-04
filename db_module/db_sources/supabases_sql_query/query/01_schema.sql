@@ -107,6 +107,7 @@ CREATE TABLE qc_record (
     CONSTRAINT chk_qc_total CHECK (qty_passed + qty_failed = qty_inspected)
 );
 
+
 -- 11. qc_defect (M:N junction with attribute)
 CREATE TABLE qc_defect (
     qc_id           INT NOT NULL REFERENCES qc_record(qc_id),
@@ -115,6 +116,7 @@ CREATE TABLE qc_defect (
     notes           TEXT,
     PRIMARY KEY (qc_id, defect_code)
 );
+
 
 -- 12. downtime_event
 CREATE TABLE downtime_event (
@@ -127,6 +129,10 @@ CREATE TABLE downtime_event (
     duration_min    NUMERIC(8,2),
     CONSTRAINT chk_downtime_window CHECK (end_ts IS NULL OR end_ts > start_ts)
 );
+
+
+
+
 
 -- ============================================================
 -- Indexes

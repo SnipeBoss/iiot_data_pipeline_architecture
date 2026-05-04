@@ -88,7 +88,7 @@ def filter_row_forecast(metrics: list[dict]) -> dict:
     #     machines = ["M01", "M02", "M03"]   
 
     
-    cols = st.columns([2, 2, 2, 2, 2])
+    cols = st.columns([2, 2, 2, 2, 2, 2])
     with cols[0]:
         machine = st.selectbox("Machine", machines, key="fcst_machine")
 
@@ -96,22 +96,29 @@ def filter_row_forecast(metrics: list[dict]) -> dict:
     machine_metrics = [m["metric_name"] for m in metrics
                        if m.get("machine_code") == machine
                        or m.get("machine_code") is None]
-    
+
     # # Fall backs
     # if not machine_metrics:
-    #     machine_metrics = ["temperature_c"]   
+    #     machine_metrics = ["temperature_c"]
 
     with cols[1]:
         metric = st.selectbox("Metric", machine_metrics, key="fcst_metric")
-    
+
     with cols[2]:
+        # History lookback — ยิ่งยาว Prophet เห็น seasonality ดีขึ้น แต่โหลดช้าครั้งแรก
+        # (API ถูกเรียก N ครั้ง ตามจำนวนวัน, cache 5 นาที)
+        lookback = st.selectbox("Lookback",
+                                ["7 days", "14 days", "30 days"],
+                                index=0, key="fcst_lookback")
+
+    with cols[3]:
         horizon = st.selectbox("Horizon",
                                ["6 hours", "12 hours", "24 hours"],
                                index=0, key="fcst_horizon")
-    with cols[3]:
+    with cols[4]:
         train = st.button("Train model", key="fcst_train",
                           use_container_width=True)
-    with cols[4]:
+    with cols[5]:
         refresh = st.button("Refresh", key="fcst_refresh",
                             use_container_width=True)
 
@@ -122,6 +129,7 @@ def filter_row_forecast(metrics: list[dict]) -> dict:
     return {
         "machine": machine,
         "metric": metric,
+        "lookback": lookback,
         "horizon": horizon,
         "train_clicked": train,
     }

@@ -26,18 +26,6 @@ from components.filters import filter_row_oee_defect
 
 
 
-
-"""
-Page 1 — OEE + Defect Rate
-
-Components:
-  A: 4 KPI cards (OEE / Availability / Performance / Quality)
-  B: OEE trend line chart
-  C: Defect Pareto bar+line
-  D: Defect rate by battery model (จาก batch-features aggregation)
-  E: Defect detail table
-"""
-
 # Set Page Title
 st.set_page_config(
     page_title="OEE & Defect", 
@@ -164,6 +152,13 @@ if not oee_df.empty:
 else:
     st.info("No data to plot")
 
+
+# Show as Dataframe
+st.dataframe(
+    oee_df,
+    use_container_width=True,
+    hide_index=True,
+)
 
 st.divider()
 

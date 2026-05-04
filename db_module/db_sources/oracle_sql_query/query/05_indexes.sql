@@ -2,6 +2,11 @@
 -- DW Indexes — FK joins + time-range queries
 -- Run after 02_schema_fact.sql (tables must exist)
 -- ============================================================
+-- SELECT index_name, column_name, column_position
+-- FROM user_ind_columns
+-- WHERE table_name = 'FACT_PRODUCTION'
+-- ORDER BY index_name, column_position;
+
 
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  FACT_PRODUCTION indexes                                 │

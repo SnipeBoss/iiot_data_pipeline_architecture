@@ -38,13 +38,16 @@ def _period_to_start_date_id(period: str) -> int:
 
     if period == "Today":
         start = today
-    
+
     elif period == "This week":
         start = today - timedelta(days=today.weekday())
-    
+
+    elif period == "Last 30 days":
+        start = today - timedelta(days=30)
+
     else:  # "Last 7 days" / default
         start = today - timedelta(days=7)
-    
+
     return int(start.strftime("%Y%m%d"))
 
 
@@ -212,32 +215,43 @@ _SQL_V_OEE_DAILY = """
                   FACT_DOWNTIME.line_id,
                   FACT_DOWNTIME.shift_id
     )
+
+
     SELECT production_agg.date_id,
            production_agg.line_id,
            production_agg.shift_id,
+    
            CASE WHEN production_agg.total_planned_min > 0 THEN
                 (production_agg.total_planned_min - NVL(downtime_agg.total_down_min, 0))
                 / production_agg.total_planned_min
                 ELSE 0 END AS availability,
+    
            CASE WHEN production_agg.total_qty_planned > 0 THEN
                 production_agg.total_qty_out / production_agg.total_qty_planned
                 ELSE 0 END AS performance,
+           
            CASE WHEN quality_agg.total_inspected > 0 THEN
                 quality_agg.total_passed / quality_agg.total_inspected
                 ELSE 0 END AS quality,
+           
            CASE WHEN production_agg.total_planned_min > 0
                  AND production_agg.total_qty_planned > 0
                  AND quality_agg.total_inspected      > 0
                 THEN (production_agg.total_planned_min - NVL(downtime_agg.total_down_min, 0))
                        / production_agg.total_planned_min
+
                    * production_agg.total_qty_out     / production_agg.total_qty_planned
+
                    * quality_agg.total_passed         / quality_agg.total_inspected
+
                 ELSE 0 END AS oee,
+           
            production_agg.total_qty_out,
            production_agg.total_qty_planned,
            NVL(downtime_agg.total_down_min, 0) AS downtime_min,
            quality_agg.total_inspected,
            quality_agg.total_passed
+      
       FROM production_agg
       LEFT JOIN quality_agg  ON quality_agg.date_id  = production_agg.date_id
                             AND quality_agg.line_id  = production_agg.line_id
@@ -357,6 +371,7 @@ _SQL_V_DEFECT_PARETO = """
            defect_type.severity,
            COUNT(*)                  AS occurrence_count,
            SUM(defect.qty_affected)  AS total_qty_affected
+
       FROM FACT_DEFECT      defect
       JOIN DIM_DEFECT_TYPE  defect_type ON defect.defect_id = defect_type.defect_id
      WHERE defect_type.is_leaf  = 'Y'
@@ -429,10 +444,12 @@ _SQL_V_SCHEDULE_ADHERENCE = """
                ELSE 'LATE'
            END                              AS adherence_status,
            production.yield_rate
+
       FROM FACT_PRODUCTION    production
       JOIN DIM_BATTERY_MODEL  model      ON production.model_id = model.model_id
       JOIN DIM_LINE           prod_line  ON production.line_id  = prod_line.line_id
       JOIN DIM_SHIFT          prod_shift ON production.shift_id = prod_shift.shift_id
+     
      WHERE production.date_id >= ?
      ORDER BY production.start_time
 """

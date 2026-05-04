@@ -1,23 +1,23 @@
 -- ============================================================
--- DIM Sync Procedures (sync from Supabase OLTP)
--- 
--- Pattern: MERGE BY src_id (NOT delete+insert)
--- Why: preserve surrogate key stability across syncs
---      → FACT FK ที่ชี้ surrogate ไม่หายแม้ source ขยับ
+-- Stored Procedure สำหรับ sync DIM (ดึงข้อมูลจาก Supabase OLTP)
 --
--- Note: Supabase data ลง Oracle ผ่าน Airflow DAG → STG_LINE,
---       STG_BATTERY_MODEL, STG_MACHINE (transient tables)
---       SP นี้อ่าน STG → MERGE เข้า DIM
+-- Pattern: MERGE BY src_id (ไม่ใช้ delete+insert)
+-- เหตุผล: เพื่อรักษา surrogate key ให้คงที่ทุกครั้งที่ sync
+--         → FACT FK ที่ชี้มา surrogate จะไม่หาย แม้ source จะเปลี่ยน
+--
+-- หมายเหตุ: ข้อมูลจาก Supabase ถูกส่งเข้า Oracle ผ่าน Airflow DAG
+--           มาลงที่ STG_LINE, STG_BATTERY_MODEL, STG_MACHINE
+--           (transient tables) จากนั้น SP นี้อ่าน STG แล้ว MERGE เข้า DIM
 -- ============================================================
 
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  SP_SYNC_DIM_LINE                                        │
--- │  Source: production_line table from Supabase             │
+-- │  Source: ตาราง production_line จาก Supabase              │
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_SYNC_DIM_LINE AS
 BEGIN
-    -- MERGE pattern: insert new, update existing, never delete
-    -- (preserve surrogate keys for FACT FK integrity)
+
+    -- รูปแบบ MERGE: insert ของใหม่, update ของเก่า, ไม่ลบทิ้ง --> (เพื่อรักษา surrogate key สำหรับ integrity ของ FACT FK)
     MERGE INTO DIM_LINE d
     USING (
         SELECT 
@@ -28,14 +28,23 @@ BEGIN
         FROM STG_LINE
     ) src
     ON (d.line_src_id = src.src_id)
+    
+
     WHEN MATCHED THEN UPDATE SET
         d.line_code     = src.line_code,
         d.line_name     = src.line_name,
         d.area          = src.area,
         d.is_active     = 'Y'
+
+
     WHEN NOT MATCHED THEN INSERT (
-        line_id, line_src_id, line_code, line_name, area, 
-        process_type, is_active
+        line_id, 
+        line_src_id, 
+        line_code, 
+        line_name, 
+        area, 
+        process_type, 
+        is_active
     ) VALUES (
         SEQ_DIM_LINE.NEXTVAL,
         src.src_id,
@@ -59,10 +68,21 @@ EXCEPTION
 END SP_SYNC_DIM_LINE;
 /
 
+
+
+
+
+
+
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  SP_SYNC_DIM_BATTERY_MODEL                               │
--- │  Source: battery_model table from Supabase               │
--- │  Includes: derived capacity_class column                 │
+-- │  Source: ตาราง battery_model จาก Supabase                │
+-- │  เพิ่ม: คอลัมน์ capacity_class ที่ derive จาก model_code  │
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_SYNC_DIM_BATTERY_MODEL AS
 BEGIN
@@ -78,7 +98,7 @@ BEGIN
             dim_length_mm,
             dim_width_mm,
             dim_height_mm,
-            -- Derived: classify by capacity (60AH/75AH/100AH)
+            -- Derive: จัดกลุ่มตามขนาดความจุ (60AH/75AH/100AH)
             CASE 
                 WHEN model_code LIKE '%60AH%'  THEN 'Standard'
                 WHEN model_code LIKE '%75AH%'  THEN 'Premium'
@@ -131,15 +151,23 @@ EXCEPTION
 END SP_SYNC_DIM_BATTERY_MODEL;
 /
 
+
+
+
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
 -- │  SP_SYNC_DIM_MACHINE                                     │
--- │  Source: machine JOIN production_line from Supabase      │
--- │  Denormalize line_name into DIM_MACHINE                  │
+-- │  Source: machine JOIN production_line จาก Supabase       │
+-- │  Denormalize ชื่อ line_name ลงใน DIM_MACHINE             │
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_SYNC_DIM_MACHINE AS
 BEGIN
-    -- DIM_LINE must exist first (FK constraint)
-    -- Run order: SP_SYNC_DIM_LINE → SP_SYNC_DIM_MACHINE
+    -- DIM_LINE ต้องมีข้อมูลก่อน (ติด FK constraint)
+    -- ลำดับการรัน: SP_SYNC_DIM_LINE → SP_SYNC_DIM_MACHINE
     MERGE INTO DIM_MACHINE d
     USING (
         SELECT 
@@ -147,12 +175,12 @@ BEGIN
             m.machine_code,
             m.machine_type,
             m.sequence_position,
-            l.line_id           AS surrogate_line_id,    -- DW key
+            l.line_id           AS surrogate_line_id,    -- key ฝั่ง DW
             l.line_name,
             m.install_date,
             m.is_active
         FROM STG_MACHINE m
-        JOIN DIM_LINE l ON l.line_src_id = m.line_id    -- lookup business→surrogate
+        JOIN DIM_LINE l ON l.line_src_id = m.line_id    -- map business key → surrogate key
     ) src
     ON (d.machine_src_id = src.src_id)
     WHEN MATCHED THEN UPDATE SET
@@ -186,13 +214,20 @@ EXCEPTION
 END SP_SYNC_DIM_MACHINE;
 /
 
+
+
+
+
+
+
+
 -- ┌──────────────────────────────────────────────────────────┐
--- │  Master sync orchestrator                                │
--- │  Run all DIMs in dependency order                        │
+-- │  Master orchestrator สำหรับ sync ทุก DIM                 │
+-- │  รัน DIM ทั้งหมดตามลำดับ dependency                       │
 -- └──────────────────────────────────────────────────────────┘
 CREATE OR REPLACE PROCEDURE SP_SYNC_ALL_DIMS AS
 BEGIN
-    SP_SYNC_DIM_LINE;                  -- Must run first (DIM_MACHINE depends on it)
+    SP_SYNC_DIM_LINE;                  -- ต้องรันเป็นลำดับแรก (DIM_MACHINE ต้องใช้)
     SP_SYNC_DIM_BATTERY_MODEL;
     SP_SYNC_DIM_MACHINE;
 END SP_SYNC_ALL_DIMS;

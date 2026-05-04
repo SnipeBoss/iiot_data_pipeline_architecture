@@ -15,8 +15,7 @@ from _supabase import supabase_cursor
 Sync master data จาก Supabase OLTP → Oracle DIM_* (LINE / BATTERY_MODEL / MACHINE)
 
 Pattern:
-    Supabase ──psycopg2──▶ STG_LINE/BATTERY_MODEL/MACHINE (truncate-and-load)
-                       ──▶ SP_SYNC_ALL_DIMS (MERGE BY src_id → DIM_*)
+    Supabase ──psycopg2──▶ STG_LINE/BATTERY_MODEL/MACHINE (truncate-and-load) ──▶ SP_SYNC_ALL_DIMS (MERGE BY src_id → DIM_*)
 
 ทำไม MERGE pattern: เก็บ surrogate key เสถียรข้าม sync — FACT FK ที่ชี้
 DIM surrogate ไม่ orphan เมื่อ sync ครั้งหน้า
@@ -40,14 +39,18 @@ def check_oracle_api(**_) -> None:
 
 
 def _extract(sql: str) -> list[list]:
-    """ดึงทุก row จาก Supabase (ไม่ filter time — DIM = master data)"""
+    """
+    ดึงทุก row จาก Supabase (ไม่ filter time — DIM = master data)
+    """
     with supabase_cursor() as cur:
         cur.execute(sql)
         return [list(row) for row in cur.fetchall()]
 
 
 def load_stg_line(**ctx) -> None:
-    """Extract production_line → STG_LINE"""
+    """
+    Extract production_line → STG_LINE
+    """
     run_id = ctx["run_id"]
     rows = _extract("""
         SELECT line_id, name, area FROM production_line ORDER BY line_id
