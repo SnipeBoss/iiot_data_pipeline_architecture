@@ -273,4 +273,4 @@ Streamlit caches via `@st.cache_data(ttl=300)`; effective hit rate ~95 % against
 
 KMITL Computer Science — IIoT Data Architecture project (2026).
 
-Built by [@SnipeBoss](https://github.com/SnipeBoss) with assistance from Claude Code.
+Built by [@SnipeBoss](https://github.com/SnipeBoss).
